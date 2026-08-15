@@ -1,7 +1,7 @@
 {
   "name": "dsh-client-masquerade",
   "version": "1.0.0",
-  "description": "DeepSeek Harness dynamic plugin: make a custom llm-pi-ai provider route masquerade as Claude Code / Codex by injecting spoofed client-identity headers into its profile settings.",
+  "description": "DeepSeek Harness plugin: make a custom llm-pi-ai provider route masquerade as Claude Code / Codex by injecting spoofed client-identity headers into its profile settings.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -13,15 +13,56 @@
     "headers"
   ],
   "license": "MIT",
-  "main": "plugin.js",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./host.body": "./host.body.js",
+    "./client.body": "./client.body.js",
+    "./plugin": "./plugin.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
   "files": [
+    "index.js",
+    "client.js",
     "host.body.js",
     "client.body.js",
     "plugin.js",
+    "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "engines": {
     "node": ">=18"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   }
 }
