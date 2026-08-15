@@ -6,6 +6,7 @@ const NS = 'llm-pi-ai';
 
 const PRESETS = {
   'claude-code': {
+    'user-agent': 'claude-cli/2.0.0 (external, cli)',
     'anthropic-client': 'claude-code/2.0.0',
     'x-app': 'cli',
     'x-stainless-package-version': '0.94.0',
@@ -16,6 +17,7 @@ const PRESETS = {
     'x-stainless-runtime-version': 'v26.3.0'
   },
   'codex': {
+    'user-agent': 'codex-tui/0.145.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.145.0)',
     'openai-client': 'codex/0.48.0',
     'x-stainless-package-version': '0.48.0',
     'x-stainless-os': 'Windows',
@@ -31,7 +33,7 @@ for (const id of Object.keys(PRESETS)) {
     if (SPOOF_KEYS.indexOf(name) === -1) SPOOF_KEYS.push(name);
   }
 }
-const RESERVED_HEADERS = ['user-agent'];
+const RESERVED_HEADERS = ['user-agent']; // attribution default; an explicit profile user-agent is now honored on the wire
 
 function detectPreset(headers) {
   if (headers === undefined || headers === null || typeof headers !== 'object') return null;
@@ -160,13 +162,18 @@ return {
       requireProvider(map, providerId);
       const profile = map[providerId];
       const headers = headersOf(profile);
-      // Mirror the pi-ai adapter's requestHeaders: reserved attribution names are
-      // stripped from profile headers and replaced by the attribution User-Agent.
+      // Mirror the pi-ai adapter's requestHeaders: attribution names are used as
+      // defaults, but an explicitly configured profile user-agent wins on the wire.
       const effective = {};
       for (const name of Object.keys(headers)) {
         if (RESERVED_HEADERS.indexOf(name.toLowerCase()) === -1) effective[name] = String(headers[name]);
       }
-      effective['user-agent'] = 'deepseek-harness (attribution; profile user-agent is reserved) ' + (detectPreset(headers) || 'no-disguise');
+      const profileUA = Object.keys(headers).find((name) => name.toLowerCase() === 'user-agent');
+      if (profileUA === undefined) {
+        effective['user-agent'] = 'deepseek-harness (attribution; profile user-agent is reserved) ' + (detectPreset(headers) || 'no-disguise');
+      } else {
+        effective['user-agent'] = String(headers[profileUA]);
+      }
       const models = profile.models && Array.isArray(profile.models) ? profile.models : [];
       const chosen = modelId || (models.length > 0 && models[0] && models[0].id ? models[0].id : '');
       if (!chosen) return { ok: false, error: 'provider has no models configured; pass model explicitly' };

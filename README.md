@@ -51,15 +51,15 @@ dsh web
 
 ## 工作原理 / How it works
 
-pi-ai 适配器（`dsh-llm-pi-ai`）的 provider 配置原生支持 `headers` 字典，并会在线路上发送它们；唯一例外是**归属标头 `user-agent`**：DSH 强制保留为 `deepseek-harness/...`，profile 里配置的 `user-agent` 会被适配器剥离并覆盖（这是设计约束，插件无法绕过）。因此预设使用网关真正识别的非保留身份头：
+pi-ai 适配器（`dsh-llm-pi-ai`）的 provider 配置原生支持 `headers` 字典，并会在线路上发送它们。归属标头 `user-agent` 默认保留为 `deepseek-harness/...`，但配合适配器补丁（见 `patches/`）后，**profile 里显式配置的 `user-agent` 会原样发到线上**；未配置时仍回落到归属 User-Agent。预设因此同时写入网关真正识别的身份头与 User-Agent：
 
 | 预设 | 写入的请求头 |
 | --- | --- |
-| `claude-code` | `anthropic-client: claude-code/2.0.0`、`x-app: cli`、`x-stainless-*` 系列 |
-| `codex` | `openai-client: codex/0.48.0`、`x-stainless-*` 系列 |
+| `claude-code` | `user-agent: claude-cli/2.0.0 (external, cli)`、`anthropic-client: claude-code/2.0.0`、`x-app: cli`、`x-stainless-*` 系列 |
+| `codex` | `user-agent: codex-tui/0.145.0 (...)`、`openai-client: codex/0.48.0`、`x-stainless-*` 系列 |
 | `custom` | 任意（通过 `headersJson` 传入） |
 
-> 若你的网关按 `user-agent` 识别客户端，该头无法被覆盖——这是 DeepSeek Harness 归属机制的设计约束。
+> 为什么需要补丁：原生 `dsh-llm-pi-ai` 会把 profile 的 `user-agent` 剥离并强制覆盖为 `deepseek-harness/...`，导致按 User-Agent 识别客户端的网关（如 agentrouter）拒绝请求（401 UNAUTHENTICATED）。`patches/apply-pi-ai-useragent-patch.mjs` 会把安装目录里 `@deepseek-ai/dsh-llm-pi-ai/lib/index.js` 的 `requestHeaders` 改为：显式配置的 profile `user-agent` 优先上线，未配置时回落归属 User-Agent。重装/升级 `dsh-llm-pi-ai` 后需重新应用。
 
 ## 使用 / Usage
 
@@ -92,7 +92,7 @@ mask_client action=test provider=agen-openai
 ## 限制 / Limitations
 
 - 仅作用于 **`llm-pi-ai` 自定义 provider**；内置 `deepseek-official` 适配器没有请求头钩子，无法用此方式伪装。
-- `user-agent` 不可覆盖（见上文）。
+- 预设现在包含 `user-agent`；未打 `patches/` 补丁时，`user-agent` 仍会被归属机制覆盖（其余身份头不受影响）。
 - 伪装头会真实写入设置文档并持久化；停用插件不会自动撤销，需要执行 `off` 或清除 provider 的 `headers` 字段。
 
 ## License
