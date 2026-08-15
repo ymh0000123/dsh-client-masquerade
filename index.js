@@ -13,9 +13,6 @@
  * host realm, so plain object literals are fine for settings.mutate and the
  * model tool registers through ctx.tools instead of the dynamic `harness`.
  */
-
-const { defineTool } = require('@deepseek-ai/dsh-tools');
-
 const NAME = 'dsh-client-masquerade';
 const NS = 'llm-pi-ai';
 const API_PATH = '/dsh-client-masquerade/api';
@@ -89,7 +86,7 @@ function isLocalHost(host) {
   return h.indexOf('127.0.0.1') === 0 || h.indexOf('localhost') === 0 || h.indexOf('[::1]') === 0 || h.indexOf('::1') === 0;
 }
 
-function apply(ctx) {
+async function apply(ctx) {
   const settings = ctx.get('settings');
   if (settings === undefined) {
     console.error(NAME + ': settings service unavailable');
@@ -272,6 +269,7 @@ function apply(ctx) {
   // Model tool (same schema as the dynamic variant, registered natively).
   const tools = ctx.get('tools');
   if (tools !== undefined) {
+    const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
       description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes and their current disguise; test makes one real streaming call through the route and reports what the gateway received.',
@@ -320,4 +318,8 @@ function apply(ctx) {
   console.log(NAME + ' ready: llm-pi-ai spoof controller active');
 }
 
-module.exports = { name: NAME, apply };
+module.exports = {
+  name: NAME,
+  inject: ['settings', 'tools', 'llm', 'webServer'],
+  apply
+};
