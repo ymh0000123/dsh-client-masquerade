@@ -55,8 +55,8 @@ pi-ai 适配器（`dsh-llm-pi-ai`）的 provider 配置原生支持 `headers` �
 
 | 预设 | 写入的请求头 |
 | --- | --- |
-| `claude-code` | `anthropic-client: claude-code/2.0.0`、`x-app: claude-code` |
-| `codex` | `openai-client: codex/0.48.0`、`x-stainless-package-version/os/arch/runtime/runtime-version` |
+| `claude-code` | `anthropic-client: claude-code/2.0.0`、`x-app: cli`、`x-stainless-*` 系列 |
+| `codex` | `openai-client: codex/0.48.0`、`x-stainless-*` 系列 |
 | `custom` | 任意（通过 `headersJson` 传入） |
 
 > 若你的网关按 `user-agent` 识别客户端，该头无法被覆盖——这是 DeepSeek Harness 归属机制的设计约束。

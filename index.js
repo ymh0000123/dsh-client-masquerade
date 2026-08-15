@@ -20,13 +20,20 @@ const API_PATH = '/dsh-client-masquerade/api';
 const PRESETS = {
   'claude-code': {
     'anthropic-client': 'claude-code/2.0.0',
-    'x-app': 'claude-code'
+    'x-app': 'cli',
+    'x-stainless-package-version': '0.94.0',
+    'x-stainless-os': 'Windows',
+    'x-stainless-arch': 'x64',
+    'x-stainless-lang': 'js',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': 'v26.3.0'
   },
   'codex': {
     'openai-client': 'codex/0.48.0',
     'x-stainless-package-version': '0.48.0',
     'x-stainless-os': 'Windows',
     'x-stainless-arch': 'x64',
+    'x-stainless-lang': 'js',
     'x-stainless-runtime': 'node',
     'x-stainless-runtime-version': '22.0.0'
   }
