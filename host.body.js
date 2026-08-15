@@ -119,7 +119,13 @@ return {
       const base = presetId === 'custom' ? {} : PRESETS[presetId];
       if (base === undefined) throw new Error('unknown preset "' + presetId + '"');
       const current = headersOf(map[providerId]);
-      const next = Object.assign({}, current, base, parseExtra(headersJson));
+      // Strip ALL spoof keys first so switching presets never leaves stale headers
+      // from a previous preset (e.g. anthropic-client when switching to codex).
+      const sanitized = {};
+      for (const name of Object.keys(current)) {
+        if (SPOOF_KEYS.indexOf(name) === -1) sanitized[name] = current[name];
+      }
+      const next = Object.assign({}, sanitized, base, parseExtra(headersJson));
       if (!settings.writable) throw new Error('settings are not writable in this deployment');
       await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', providerId, 'headers'], value: next })]);
       return { provider: providerId, preset: presetId, headers: next };
