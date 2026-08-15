@@ -63,11 +63,16 @@ function interpolate(str, params) {
 
 const row = (children, style) => el('div', { style: Object.assign({ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }, style || {}) }, children);
 
+// Theme the controls with the GUI's design tokens (dsw alias variables).
+const MASK_CSS = '.dshcm-select{box-sizing:border-box;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:20px;padding:4px 8px;max-width:260px}.dshcm-btn{box-sizing:border-box;cursor:pointer;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;line-height:20px;padding:4px 12px;transition:background 120ms ease,border-color 120ms ease}.dshcm-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l2)}.dshcm-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.dshcm-btn:disabled{opacity:.5;cursor:default}.dshcm-btn-off{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}';
+
 return {
   apply(ctx) {
     const slots = ctx.get('slots');
     if (slots === undefined) return;
     const locale = ctx.get('locale');
+
+    ctx.effect(() => styles.insert(MASK_CSS));
 
     if (locale !== undefined) {
       ctx.effect(() => locale.register('client-masquerade', 'en', DICTS.en));
@@ -157,20 +162,20 @@ return {
             value: state.selected,
             disabled: state.busy,
             onChange: (e) => setState((s) => Object.assign({}, s, { selected: e.target.value })),
-            style: { fontSize: '12px', maxWidth: '240px' }
+            className: 'dshcm-select'
           }, state.providers.map((p) => el('option', { key: p.id, value: p.id }, p.displayName + ' (' + p.id + ')')))
         ]),
         el('div', { key: 'status', style: { fontSize: '12px' } }, t('status') + ': ' + statusText),
         row([
-          el('button', { key: 'cc', disabled: state.busy || !state.selected, onClick: () => act('claude-code'), style: { fontSize: '12px' } }, t('preset.claude-code')),
-          el('button', { key: 'cx', disabled: state.busy || !state.selected, onClick: () => act('codex'), style: { fontSize: '12px' } }, t('preset.codex')),
-          el('button', { key: 'off', disabled: state.busy || !state.selected, onClick: () => act('off'), style: { fontSize: '12px' } }, t('off')),
-          el('button', { key: 't', disabled: state.busy || !state.selected, onClick: () => test(), style: { fontSize: '12px' } }, t('testCall'))
+          el('button', { key: 'cc', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('claude-code') }, t('preset.claude-code')),
+          el('button', { key: 'cx', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('codex') }, t('preset.codex')),
+          el('button', { key: 'off', className: 'dshcm-btn dshcm-btn-off', disabled: state.busy || !state.selected, onClick: () => act('off') }, t('off')),
+          el('button', { key: 't', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => test() }, t('testCall'))
         ]),
         el('div', { key: 'headersLabel', style: { fontSize: '12px', fontWeight: 600 } }, t('currentHeaders')),
         el('div', { key: 'headers', style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, headerRows),
-        state.message ? el('div', { key: 'msg', style: { fontSize: '12px', color: '#2e7d32' } }, state.message) : null,
-        state.error ? el('div', { key: 'err', style: { fontSize: '12px', color: '#c62828' } }, state.error) : null
+        state.message ? el('div', { key: 'msg', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.message) : null,
+        state.error ? el('div', { key: 'err', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.error) : null
       );
     }
 
