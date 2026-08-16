@@ -23,6 +23,12 @@ dsh plugin --profile web add github:ymh0000123/dsh-client-masquerade
 node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs
 ```
 
+> 注意：`node_modules` 是相对路径，请先在 profile 目录（含 `node_modules` 的那个）里执行。不记得目录或不在该目录时，直接用**绝对路径**调用脚本即可，脚本会自动定位本 profile 里安装的 `dsh-llm-pi-ai`：
+>
+> ```bash
+> node "C:\Users\你的用户名\.dsh\profiles\web\node_modules\dsh-client-masquerade\patches\apply-pi-ai-useragent-patch.mjs"
+> ```
+
 补丁幂等，可重复执行；`pnpm install` 或升级 `dsh-llm-pi-ai` 后需重新应用一次。插件启动时也会自检：未打补丁会在日志打醒目的 `[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched` 警告。
 
 > 安装模式下也可以直接在网页设置页（Settings → Client Masquerade → **User-Agent 补丁 → 应用**）一键写入补丁，之后重启 `dsh web` 生效；动态模式无文件系统权限，仍需手动执行上面的命令。
