@@ -19,8 +19,7 @@ const API_PATH = '/dsh-client-masquerade/api';
 
 const { readFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
-// Marker comment the patch script writes into @deepseek-ai/dsh-llm-pi-ai/lib/index.js.
-const PATCH_MARKER = 'An explicitly configured profile `user-agent` is preserved';
+const { applyPatch, MARKER: PATCH_MARKER } = require('./patches/patch-lib.js');
 
 const PRESETS = {
   'claude-code': {
@@ -66,16 +65,48 @@ function detectPreset(headers) {
   return Object.keys(headers).length > 0 ? 'custom' : null;
 }
 
+/** Resolve the installed @deepseek-ai/dsh-llm-pi-ai lib/index.js path. */
+function resolvePiAiLib() {
+  const pkgJson = require.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json');
+  return join(dirname(pkgJson), 'lib', 'index.js');
+}
+
+/** Inspect the pi-ai user-agent patch state (supported=false when dsh-llm-pi-ai is missing). */
+function uaPatchState() {
+  try {
+    const target = resolvePiAiLib();
+    return { supported: true, patched: readFileSync(target, 'utf8').includes(PATCH_MARKER), target: target };
+  } catch (e) {
+    return { supported: false, patched: null, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * Apply the pi-ai user-agent patch from the web settings page.
+ * Writing succeeds immediately, but the running requestHeaders() is already in
+ * memory, so the change only takes effect after a `dsh web` restart.
+ */
+function applyUserAgentPatch() {
+  const state = uaPatchState();
+  if (state.error !== undefined) return { ok: false, error: state.error };
+  if (state.patched) return { ok: true, alreadyPatched: true, restartRequired: false, target: state.target };
+  try {
+    applyPatch(state.target);
+    return { ok: true, alreadyPatched: false, restartRequired: true, target: state.target };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
 /** Warn loudly when the pi-ai user-agent patch is missing (the #1 "disguise written but gateway 401" cause). */
 function checkUserAgentPatch() {
-  try {
-    const pkgJson = require.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json');
-    const lib = join(dirname(pkgJson), 'lib', 'index.js');
-    if (!readFileSync(lib, 'utf8').includes(PATCH_MARKER)) {
-      console.warn('[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched: an explicit profile user-agent is stripped on the wire, so User-Agent-fingerprinting gateways (agentrouter / claude-code-router) reject disguised requests with 401. Apply once (from your profile dir): node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs — then restart dsh web.');
-    }
-  } catch (e) {
-    console.warn('[client-masquerade] could not verify dsh-llm-pi-ai patch state: ' + String(e && e.message ? e.message : e));
+  const state = uaPatchState();
+  if (state.error !== undefined) {
+    console.warn('[client-masquerade] could not verify dsh-llm-pi-ai patch state: ' + state.error);
+    return;
+  }
+  if (!state.patched) {
+    console.warn('[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched: an explicit profile user-agent is stripped on the wire, so User-Agent-fingerprinting gateways (agentrouter / claude-code-router) reject disguised requests with 401. Apply it from the Client Masquerade settings page, or run (from your profile dir): node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs — then restart dsh web.');
   }
 }
 
@@ -267,7 +298,10 @@ async function apply(ctx) {
   const run = async (args, signal) => {
     const action = args && args.action ? String(args.action) : 'list';
     if (action === 'list') {
-      return { ok: true, providers: listProviders() };
+      return { ok: true, providers: listProviders(), uaPatch: uaPatchState() };
+    }
+    if (action === 'patch') {
+      return applyUserAgentPatch();
     }
     if (action === 'on') {
       const providerId = args && args.provider ? String(args.provider) : '';
@@ -311,9 +345,9 @@ async function apply(ctx) {
     const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes and their current disguise; test makes one real streaming call through the route and reports what the gateway received.',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes, the pi-ai user-agent patch state, and their current disguise; test makes one real streaming call through the route and reports what the gateway received; patch applies the pi-ai user-agent patch (restart required).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test'], description: 'list = show routes; on = apply a disguise; off = clear it; test = make one real call' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'patch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call; patch = apply the pi-ai user-agent patch (restart required)' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
         model: { type: 'string', description: "model id to test (defaults to the provider's first configured model)" },

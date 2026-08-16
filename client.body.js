@@ -26,7 +26,15 @@ const DICTS = {
     cleared: 'Cleared disguise for {provider}',
     'preset.claude-code': 'Claude Code',
     'preset.codex': 'Codex',
-    'preset.custom': 'Custom'
+    'preset.custom': 'Custom',
+    uaPatch: 'User-Agent patch',
+    uaPatched: 'applied',
+    uaNotPatched: 'not applied',
+    uaApply: 'Apply',
+    uaApplying: 'applying…',
+    uaAppliedMsg: 'Patch written — restart dsh web to take effect.',
+    uaAlready: 'Patch already applied.',
+    uaUnsupported: 'not supported in dynamic mode — run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually'
   },
   zh: {
     title: '客户端伪装',
@@ -48,7 +56,15 @@ const DICTS = {
     cleared: '已清除 {provider} 的伪装',
     'preset.claude-code': 'Claude Code',
     'preset.codex': 'Codex',
-    'preset.custom': '自定义'
+    'preset.custom': '自定义',
+    uaPatch: 'User-Agent 补丁',
+    uaPatched: '已应用',
+    uaNotPatched: '未应用',
+    uaApply: '应用',
+    uaApplying: '正在应用…',
+    uaAppliedMsg: '补丁已写入，重启 dsh web 后生效。',
+    uaAlready: '补丁已应用。',
+    uaUnsupported: '动态模式不支持在线应用——请手动执行 node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs'
   }
 };
 
@@ -84,7 +100,7 @@ return {
       : (key, params) => interpolate(DICTS.en[key] !== undefined ? DICTS.en[key] : key, params);
 
     function MaskPanel() {
-      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '' });
+      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '' });
       const [, setRev] = React.useState(0);
 
       React.useEffect(() => {
@@ -101,7 +117,8 @@ return {
             selected: s.selected || (providers.length > 0 ? providers[0].id : ''),
             busy: false,
             message: '',
-            error: ''
+            error: '',
+            uaPatch: res && res.uaPatch ? res.uaPatch : null
           }));
         }).catch((err) => {
           setState((s) => Object.assign({}, s, { busy: false, error: String(err && err.message ? err.message : err) }));
@@ -109,6 +126,25 @@ return {
       };
 
       React.useEffect(() => { refresh(); }, []);
+
+      const applyPatch = () => {
+        setState((s) => Object.assign({}, s, { patchBusy: true, patchError: '', patchMsg: '' }));
+        host.call('mask-client-rpc', { action: 'patch' })
+          .then((res) => {
+            if (res && res.ok) {
+              setState((s) => Object.assign({}, s, {
+                patchBusy: false,
+                uaPatch: res.alreadyPatched ? Object.assign({}, s.uaPatch, { patched: true }) : s.uaPatch,
+                patchMsg: res.alreadyPatched ? t('uaAlready') : t('uaAppliedMsg')
+              }));
+              return refresh();
+            }
+            setState((s) => Object.assign({}, s, { patchBusy: false, patchError: res && res.error ? res.error : t('requestFailed') }));
+          })
+          .catch((err) => {
+            setState((s) => Object.assign({}, s, { patchBusy: false, patchError: String(err && err.message ? err.message : err) }));
+          });
+      };
 
       const act = (preset) => {
         if (!state.selected) return;
@@ -166,6 +202,23 @@ return {
           }, state.providers.map((p) => el('option', { key: p.id, value: p.id }, p.displayName + ' (' + p.id + ')')))
         ]),
         el('div', { key: 'status', style: { fontSize: '12px' } }, t('status') + ': ' + statusText),
+        row([
+          el('span', { key: 'ual', style: { fontSize: '12px' } }, t('uaPatch') + ': ' + (
+            state.uaPatch === null ? t('dash')
+              : state.uaPatch.error !== undefined && state.uaPatch.error ? t('dash')
+              : state.uaPatch.patched ? t('uaPatched') : t('uaNotPatched')
+          )),
+          state.uaPatch !== null && state.uaPatch.supported
+            ? el('button', {
+              key: 'ub',
+              className: 'dshcm-btn',
+              disabled: state.patchBusy || (state.uaPatch && state.uaPatch.patched),
+              onClick: () => applyPatch()
+            }, state.patchBusy ? t('uaApplying') : t('uaApply'))
+            : el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
+        ]),
+        state.patchMsg ? el('div', { key: 'pm', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.patchMsg) : null,
+        state.patchError ? el('div', { key: 'pe', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.patchError) : null,
         row([
           el('button', { key: 'cc', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('claude-code') }, t('preset.claude-code')),
           el('button', { key: 'cx', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('codex') }, t('preset.codex')),

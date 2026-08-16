@@ -220,7 +220,10 @@ return {
     const run = async (args, signal) => {
       const action = args && args.action ? String(args.action) : 'list';
       if (action === 'list') {
-        return { ok: true, providers: listProviders() };
+        return { ok: true, providers: listProviders(), uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' } };
+      }
+      if (action === 'patch') {
+        return { ok: false, error: 'dynamic mode cannot apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' };
       }
       if (action === 'on') {
         const providerId = args && args.provider ? String(args.provider) : '';
@@ -260,9 +263,9 @@ return {
 
     ctx.effect(() => harness.registerTool(ctx, harness.defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes and their current disguise; test makes one real streaming call through the route and reports what the gateway received.',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes and their current disguise; test makes one real streaming call through the route and reports what the gateway received; patch applies the pi-ai user-agent patch (restart required).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test'], description: 'list = show routes; on = apply a disguise; off = clear it; test = make one real call' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'patch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call; patch = apply the pi-ai user-agent patch (restart required)' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
         model: { type: 'string', description: "model id to test (defaults to the provider's first configured model)" },
