@@ -17,6 +17,11 @@ const NAME = 'dsh-client-masquerade';
 const NS = 'llm-pi-ai';
 const API_PATH = '/dsh-client-masquerade/api';
 
+const { readFileSync } = require('node:fs');
+const { dirname, join } = require('node:path');
+// Marker comment the patch script writes into @deepseek-ai/dsh-llm-pi-ai/lib/index.js.
+const PATCH_MARKER = 'An explicitly configured profile `user-agent` is preserved';
+
 const PRESETS = {
   'claude-code': {
     'user-agent': 'claude-cli/2.0.0 (external, cli)',
@@ -61,6 +66,19 @@ function detectPreset(headers) {
   return Object.keys(headers).length > 0 ? 'custom' : null;
 }
 
+/** Warn loudly when the pi-ai user-agent patch is missing (the #1 "disguise written but gateway 401" cause). */
+function checkUserAgentPatch() {
+  try {
+    const pkgJson = require.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json');
+    const lib = join(dirname(pkgJson), 'lib', 'index.js');
+    if (!readFileSync(lib, 'utf8').includes(PATCH_MARKER)) {
+      console.warn('[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched: an explicit profile user-agent is stripped on the wire, so User-Agent-fingerprinting gateways (agentrouter / claude-code-router) reject disguised requests with 401. Apply once (from your profile dir): node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs — then restart dsh web.');
+    }
+  } catch (e) {
+    console.warn('[client-masquerade] could not verify dsh-llm-pi-ai patch state: ' + String(e && e.message ? e.message : e));
+  }
+}
+
 /** Collect and parse a JSON request body (node http IncomingMessage). */
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -96,6 +114,7 @@ function isLocalHost(host) {
 }
 
 async function apply(ctx) {
+  checkUserAgentPatch();
   const settings = ctx.get('settings');
   if (settings === undefined) {
     console.error(NAME + ': settings service unavailable');

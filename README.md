@@ -15,7 +15,17 @@
 dsh plugin --profile web add github:ymh0000123/dsh-client-masquerade
 ```
 
-这条命令会在 profile 目录里执行 `pnpm add github:ymh0000123/dsh-client-masquerade`，然后自动把包（其 `dsh.bundle.patch` 声明）并入该 profile 的插件层栈——**不需要手动改任何配置文件**。之后重启：
+这条命令会在 profile 目录里执行 `pnpm add github:ymh0000123/dsh-client-masquerade`，然后自动把包（其 `dsh.bundle.patch` 声明）并入该 profile 的插件层栈——**不需要手动改任何配置文件**。
+
+**然后应用 User-Agent 补丁（必做）**——否则伪装头里的 `user-agent` 会被 pi-ai 适配器的归属机制剥掉并覆盖为 `deepseek-harness/...`，按 User-Agent 识别客户端的网关（agentrouter、claude-code-router 类）会拒绝请求（**401 UNAUTHENTICATED**）。在你的 profile 目录（含 `node_modules` 的那个）执行：
+
+```bash
+node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs
+```
+
+补丁幂等，可重复执行；`pnpm install` 或升级 `dsh-llm-pi-ai` 后需重新应用一次。插件启动时也会自检：未打补丁会在日志打醒目的 `[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched` 警告。
+
+之后重启：
 
 ```bash
 dsh web
@@ -38,6 +48,8 @@ dsh web
 4. 运行插件并批准。
 
 两种方式功能等价（伪装开关、`mask_client`、设置页、测试调用），区别：方式一随 profile 持久安装，方式二为进程级临时加载。安装模式下设置页走 `webServer` HTTP 路由（`/dsh-client-masquerade/api`），动态模式下走包私有 RPC。
+
+> 动态模式同样需要 pi-ai 补丁：在 profile 目录执行 `node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs`（或手动应用 `patches/` 里的改动）并重启，否则 `user-agent` 伪装无法上线。
 
 前提：先在 **Settings → Models** 配置好你的自定义 provider（`llm-pi-ai` 路由），插件才能列出并写入。
 
