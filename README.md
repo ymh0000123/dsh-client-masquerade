@@ -44,7 +44,19 @@ dsh web
 - **Host 侧**：`mask_client` 模型工具自动注册；设置写入逻辑挂载。
 - **Web 侧**：`dsh.client` 浏览器清单自动收录，Settings 里出现 **Client Masquerade / 客户端伪装** 设置页。
 
-卸载：`dsh plugin --profile web remove dsh-client-masquerade`。
+卸载：`dsh plugin --profile web remove dsh-client-masquerade`。插件可自由安装/卸载、重复安装无副作用；卸载后有两处残留需手动清理（见下）。
+
+### 安装 / 卸载 / 清理速查
+
+| 操作 | 命令 / 位置 |
+| --- | --- |
+| 安装 | `dsh plugin --profile web add github:ymh0000123/dsh-client-masquerade` |
+| 卸载 | `dsh plugin --profile web remove dsh-client-masquerade` |
+| 补丁应用 | 设置页 **User-Agent 补丁 → 应用**，或 `node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs`（重启 `dsh web` 生效） |
+| 补丁还原 | 设置页 **User-Agent 补丁 → 还原**，或 `node .../apply-pi-ai-useragent-patch.mjs --revert`（重启 `dsh web` 生效） |
+| 清除伪装头 | 设置页点 **Off**，或 `mask_client action=off provider=<id>`（可留空 `headers` 字段） |
+
+> **卸载后残留说明**：① User-Agent 补丁是改在 `dsh-llm-pi-ai` 适配器文件上的，**卸载插件不会自动还原**——不用伪装了就用 `--revert` 还原（不动也无害，仅当 provider 显式配置 `user-agent` 时才影响线路）；② 已写入 provider 的伪装 `headers` 会保留在设置文档里，需要逐个执行 `off` 或手动清除。
 
 > 注：若之前用「动态插件」方式运行过同一份代码，请先停用/删除动态版本，避免设置页入口重复注册。
 

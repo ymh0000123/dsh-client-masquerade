@@ -65,4 +65,23 @@ function applyPatch(target) {
   return { applied: true, alreadyPatched: false };
 }
 
-module.exports = { OLD, NEW, MARKER, applyPatch };
+/**
+ * Revert the patch, restoring the stock requestHeaders block. Idempotent.
+ * @param {string} target - absolute path of the installed lib/index.js.
+ * @returns {{ reverted: boolean, alreadyStock: boolean }} reverted=true when the file was rewritten.
+ * @throws {Error} when neither the stock nor the patched block is found (version drift).
+ */
+function revertPatch(target) {
+  const src = readFileSync(target, 'utf8');
+  if (src.includes(OLD)) return { reverted: false, alreadyStock: true };
+  if (!src.includes(NEW)) {
+    throw new Error(
+      'neither the stock nor the patched requestHeaders block found in ' + target +
+      '; the installed dsh-llm-pi-ai may differ from the version this patch targets'
+    );
+  }
+  writeFileSync(target, src.replace(NEW, OLD), 'utf8');
+  return { reverted: true, alreadyStock: false };
+}
+
+module.exports = { OLD, NEW, MARKER, applyPatch, revertPatch };

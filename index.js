@@ -19,7 +19,7 @@ const API_PATH = '/dsh-client-masquerade/api';
 
 const { readFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
-const { applyPatch, MARKER: PATCH_MARKER } = require('./patches/patch-lib.js');
+const { applyPatch, revertPatch, MARKER: PATCH_MARKER } = require('./patches/patch-lib.js');
 
 const PRESETS = {
   'claude-code': {
@@ -93,6 +93,22 @@ function applyUserAgentPatch() {
   try {
     applyPatch(state.target);
     return { ok: true, alreadyPatched: false, restartRequired: true, target: state.target };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * Revert the pi-ai user-agent patch (clean uninstall support).
+ * Also requires a `dsh web` restart to take effect.
+ */
+function revertUserAgentPatch() {
+  const state = uaPatchState();
+  if (state.error !== undefined) return { ok: false, error: state.error };
+  if (!state.patched) return { ok: true, alreadyStock: true, restartRequired: false, target: state.target };
+  try {
+    revertPatch(state.target);
+    return { ok: true, alreadyStock: false, restartRequired: true, target: state.target };
   } catch (e) {
     return { ok: false, error: String(e && e.message ? e.message : e) };
   }
@@ -303,6 +319,9 @@ async function apply(ctx) {
     if (action === 'patch') {
       return applyUserAgentPatch();
     }
+    if (action === 'unpatch') {
+      return revertUserAgentPatch();
+    }
     if (action === 'on') {
       const providerId = args && args.provider ? String(args.provider) : '';
       const presetId = args && args.preset ? String(args.preset) : '';
@@ -345,9 +364,9 @@ async function apply(ctx) {
     const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes, the pi-ai user-agent patch state, and their current disguise; test makes one real streaming call through the route and reports what the gateway received; patch applies the pi-ai user-agent patch (restart required).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes, the pi-ai user-agent patch state, and their current disguise; test makes one real streaming call through the route and reports what the gateway received; patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'patch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call; patch = apply the pi-ai user-agent patch (restart required)' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call; patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
         model: { type: 'string', description: "model id to test (defaults to the provider's first configured model)" },

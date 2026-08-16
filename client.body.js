@@ -34,7 +34,11 @@ const DICTS = {
     uaApplying: 'applying…',
     uaAppliedMsg: 'Patch written — restart dsh web to take effect.',
     uaAlready: 'Patch already applied.',
-    uaUnsupported: 'not supported in dynamic mode — run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually'
+    uaUnsupported: 'not supported in dynamic mode — run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually',
+    uaRevert: 'Revert',
+    uaReverting: 'reverting…',
+    uaRevertedMsg: 'Patch reverted — restart dsh web to take effect.',
+    uaAlreadyStock: 'Patch already reverted.'
   },
   zh: {
     title: '客户端伪装',
@@ -64,7 +68,11 @@ const DICTS = {
     uaApplying: '正在应用…',
     uaAppliedMsg: '补丁已写入，重启 dsh web 后生效。',
     uaAlready: '补丁已应用。',
-    uaUnsupported: '动态模式不支持在线应用——请手动执行 node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs'
+    uaUnsupported: '动态模式不支持在线应用——请手动执行 node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs',
+    uaRevert: '还原',
+    uaReverting: '正在还原…',
+    uaRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
+    uaAlreadyStock: '补丁已是原状。'
   }
 };
 
@@ -146,6 +154,25 @@ return {
           });
       };
 
+      const unpatch = () => {
+        setState((s) => Object.assign({}, s, { patchBusy: true, patchError: '', patchMsg: '' }));
+        host.call('mask-client-rpc', { action: 'unpatch' })
+          .then((res) => {
+            if (res && res.ok) {
+              setState((s) => Object.assign({}, s, {
+                patchBusy: false,
+                uaPatch: res.alreadyStock ? Object.assign({}, s.uaPatch, { patched: false }) : s.uaPatch,
+                patchMsg: res.alreadyStock ? t('uaAlreadyStock') : t('uaRevertedMsg')
+              }));
+              return refresh();
+            }
+            setState((s) => Object.assign({}, s, { patchBusy: false, patchError: res && res.error ? res.error : t('requestFailed') }));
+          })
+          .catch((err) => {
+            setState((s) => Object.assign({}, s, { patchBusy: false, patchError: String(err && err.message ? err.message : err) }));
+          });
+      };
+
       const act = (preset) => {
         if (!state.selected) return;
         const selectedInfo = state.providers.find((p) => p.id === state.selected);
@@ -209,12 +236,19 @@ return {
               : state.uaPatch.patched ? t('uaPatched') : t('uaNotPatched')
           )),
           state.uaPatch !== null && state.uaPatch.supported
-            ? el('button', {
-              key: 'ub',
-              className: 'dshcm-btn',
-              disabled: state.patchBusy || (state.uaPatch && state.uaPatch.patched),
-              onClick: () => applyPatch()
-            }, state.patchBusy ? t('uaApplying') : t('uaApply'))
+            ? (state.uaPatch && state.uaPatch.patched
+              ? el('button', {
+                key: 'ur',
+                className: 'dshcm-btn dshcm-btn-off',
+                disabled: state.patchBusy,
+                onClick: () => unpatch()
+              }, state.patchBusy ? t('uaReverting') : t('uaRevert'))
+              : el('button', {
+                key: 'ub',
+                className: 'dshcm-btn',
+                disabled: state.patchBusy,
+                onClick: () => applyPatch()
+              }, state.patchBusy ? t('uaApplying') : t('uaApply')))
             : el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
         ]),
         state.patchMsg ? el('div', { key: 'pm', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.patchMsg) : null,
