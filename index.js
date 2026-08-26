@@ -357,11 +357,34 @@ async function apply(ctx) {
 
   const listProviders = () => {
     const map = providersMap();
+    const llm = ctx.get('llm');
     return Object.keys(map).map((id) => {
       const profile = map[id];
       const headers = headersOf(profile);
       const detected = detectPresetDetailed(headers);
       const rp = retryPolicyOf(profile);
+      // The policy the AGENT LOOP actually executes: captured in the llm
+      // registration at adapter (re)registration time, handed to
+      // agent/request-error via prepareCall, and consumed by dsh-llm-retry.
+      // It follows settings changes live (pi-ai re-registers on onChange), so
+      // this is the ground truth for whether the queue policy is in effect.
+      let registrationRetryPolicy = null;
+      if (llm !== undefined) {
+        try {
+          const reg = llm.providerRetryPolicy(id);
+          if (reg !== undefined && reg !== null) {
+            registrationRetryPolicy = {
+              mode: typeof reg.mode === 'string' ? reg.mode : null,
+              maxRetries: typeof reg.maxRetries === 'number' ? reg.maxRetries : null,
+              initialDelayMs: typeof reg.initialDelayMs === 'number' ? reg.initialDelayMs : null,
+              maxDelayMs: typeof reg.maxDelayMs === 'number' ? reg.maxDelayMs : null,
+              retryableCodes: Array.isArray(reg.retryableCodes) ? reg.retryableCodes.map(String) : []
+            };
+          }
+        } catch (e) {
+          registrationRetryPolicy = { error: String(e && e.message ? e.message : e) };
+        }
+      }
       return {
         id: id,
         displayName: profile && typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
@@ -378,6 +401,9 @@ async function apply(ctx) {
           maxDelayMs: rp.backoff !== null && typeof rp.backoff === 'object' && typeof rp.backoff.maxDelayMs === 'number' ? rp.backoff.maxDelayMs : null,
           retryableCodes: Array.isArray(rp.retryableCodes) ? rp.retryableCodes.map(String) : []
         },
+        // What the agent loop will actually use — matches retryPolicy when the
+        // settings change has propagated (it does, live).
+        registrationRetryPolicy: registrationRetryPolicy,
         headers: Object.keys(headers).map((name) => ({ name: name, value: String(headers[name]) }))
       };
     });
@@ -653,7 +679,7 @@ async function apply(ctx) {
     const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps, so agent turns outwait the queue instead of failing after the default ~30s. list shows routes, the pi-ai user-agent patch state, current disguise (stale=true means an older preset that should be re-applied) and whether the queue policy is on; test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps, so agent turns outwait the queue instead of failing after the default ~30s. list shows routes, the pi-ai user-agent patch state, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
       parameters: {
         action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/queue)' },

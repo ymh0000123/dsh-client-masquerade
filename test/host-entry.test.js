@@ -194,6 +194,18 @@ test('queue action wiring exists in both host halves', () => {
   }
 });
 
+// list must surface not only the settings retryPolicy but the policy the agent
+// loop actually executes (the llm registration's), so the user can verify the
+// queue mechanism is live without guessing.
+test('list reports the registration retryPolicy (agent-loop ground truth)', () => {
+  for (const file of ['index.js', 'host.body.js']) {
+    const src = read(file);
+    assert.ok(src.includes('llm.providerRetryPolicy('), `${file}: listProviders must read the registration policy`);
+    assert.ok(src.includes('registrationRetryPolicy'), `${file}: listProviders must expose registrationRetryPolicy`);
+    assert.ok(src.includes('initialDelayMs'), `${file}: the registration summary must include backoff start`);
+  }
+});
+
 // Switching presets must never leave a previous preset's identity headers
 // behind, including the ones added for the beta gate.
 test('every preset key is tracked for cleanup', () => {

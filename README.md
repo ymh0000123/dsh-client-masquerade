@@ -126,9 +126,17 @@ mask_client action=queue provider=anyrouter state=off           # 关闭，回�
 ```
 
 - 默认策略：`maxRetries=10`、退避 1s→30s（指数 + 抖动）、可重试码覆盖 `RATE_LIMIT`（429）与 `SERVER`（5xx）等，累计等待约 2-3 分钟——足以排过典型的长队，又不至于让真正死掉的线路挂住不报错。
-- `list` 会显示每个 provider 的排队状态（`queue: true/false` + 策略摘要）；设置页也有 **排队适配** 开关。
+- `list` 会显示每个 provider 的排队状态（`queue: true/false` + 策略摘要）以及 **`registrationRetryPolicy`**——这是 **agent 循环实际执行**的策略（llm 注册表里捕获、经 `prepareCall` 交给 `agent/request-error` 由 `dsh-llm-retry` 消费）。它跟着 settings 变更**实时**更新（pi-ai 在 onChange 时重新注册路由），所以看到 `registrationRetryPolicy.maxRetries == 10 / maxDelayMs == 30000` 即证明排队机制已生效，无需猜测。
+- 设置页也有 **排队适配** 开关。
 - `test` 动作同样会**带退避骑队列**（最多约 2-3 分钟，可被调用方中断），而不是试两三次就报失败；最终仍失败时返回 `classification: queued`、`disguiseImplicated: false`。
 
+> 验证"排队机制是否真的在跑"：
+> 1. `mask_client action=list provider=anyrouter` → 确认 `queue: true` 且 `registrationRetryPolicy` 与 `retryPolicy` 一致（maxRetries=10、maxDelayMs=30000）。一致即代表 agent 循环会用排队策略。
+> 2. `mask_client action=test provider=anyrouter` → 观察 `attempts`（会到 10）与 `classification: queued`，说明测试在带退避骑队列。
+> 3. 用 anyrouter 作为模型发一条真实消息：失败时会看到 agent 带退避重试约 2-3 分钟（会话里会出现 `llm/retry` 事件，policyKey 含 maxRetries=10 / maxDelayMs=30000），而不是 30 秒就放弃。
+>
+> 若第 1 步显示 `registrationRetryPolicy` 与 settings 不一致（例如仍是 maxRetries=5 / maxDelayMs=10000 的默认值），说明运行中的进程还没完成注册更新——重启 `dsh web` 后必然一致（策略写入 settings 后实时传播；插件代码升级本身也需要重启加载）。
+>
 > 注意：策略写入的是设置文档，pi-ai 适配器每次请求都会重新读取 profile，因此**无需重启**即可对下一次 agent 请求生效（插件本体升级仍需重启 `dsh web`）。
 
 ## 使用 / Usage
