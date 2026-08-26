@@ -40,7 +40,15 @@ const DICTS = {
     uaRevert: 'Revert',
     uaReverting: 'reverting…',
     uaRevertedMsg: 'Patch reverted — restart dsh web to take effect.',
-    uaAlreadyStock: 'Patch already reverted.'
+    uaAlreadyStock: 'Patch already reverted.',
+    queue: 'Queue adaptation',
+    queueOn: 'Queued (retries {retries}×, up to {maxdelay}ms)',
+    queueOff: 'Off',
+    queueEnable: 'Queue on',
+    queueDisable: 'Queue off',
+    queueBusy: 'updating…',
+    queueEnabledMsg: 'Queue policy enabled for {provider} — agent turns now outwait 429/503 with backoff.',
+    queueDisabledMsg: 'Queue policy cleared for {provider}.'
   },
   zh: {
     title: '客户端伪装',
@@ -76,7 +84,15 @@ const DICTS = {
     uaRevert: '还原',
     uaReverting: '正在还原…',
     uaRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
-    uaAlreadyStock: '补丁已是原状。'
+    uaAlreadyStock: '补丁已是原状。',
+    queue: '排队适配',
+    queueOn: '已开启（重试 {retries} 次，最长 {maxdelay}ms）',
+    queueOff: '关闭',
+    queueEnable: '开启排队',
+    queueDisable: '关闭排队',
+    queueBusy: '更新中…',
+    queueEnabledMsg: '已为 {provider} 开启排队策略——agent 请求将带退避重试，等待 429/503 渠道空闲。',
+    queueDisabledMsg: '已清除 {provider} 的排队策略。'
   }
 };
 
@@ -112,7 +128,7 @@ return {
       : (key, params) => interpolate(DICTS.en[key] !== undefined ? DICTS.en[key] : key, params);
 
     function MaskPanel() {
-      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '' });
+      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false });
       const [, setRev] = React.useState(0);
 
       React.useEffect(() => {
@@ -174,6 +190,26 @@ return {
           })
           .catch((err) => {
             setState((s) => Object.assign({}, s, { patchBusy: false, patchError: String(err && err.message ? err.message : err) }));
+          });
+      };
+
+      const toggleQueue = (enabled) => {
+        if (!state.selected) return;
+        setState((s) => Object.assign({}, s, { queueBusy: true, error: '', message: '' }));
+        host.call('mask-client-rpc', { action: 'queue', provider: state.selected, state: enabled ? 'on' : 'off' })
+          .then((res) => {
+            if (res && res.ok) {
+              const label = (state.providers.find((p) => p.id === state.selected) || {}).displayName || state.selected;
+              setState((s) => Object.assign({}, s, {
+                queueBusy: false,
+                message: enabled ? t('queueEnabledMsg', { provider: label }) : t('queueDisabledMsg', { provider: label })
+              }));
+              return refresh();
+            }
+            setState((s) => Object.assign({}, s, { queueBusy: false, error: res && res.error ? res.error : t('requestFailed') }));
+          })
+          .catch((err) => {
+            setState((s) => Object.assign({}, s, { queueBusy: false, error: String(err && err.message ? err.message : err) }));
           });
       };
 
@@ -267,6 +303,24 @@ return {
                 onClick: () => applyPatch()
               }, state.patchBusy ? t('uaApplying') : t('uaApply')))
             : el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
+        ]),
+        row([
+          el('span', { key: 'ql', style: { fontSize: '12px' } }, t('queue') + ': ' + (
+            selectedInfo && selectedInfo.queue
+              ? t('queueOn', {
+                retries: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxRetries) || '—',
+                maxdelay: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxDelayMs) || '—'
+              })
+              : t('queueOff')
+          )),
+          el('button', {
+            key: 'qb',
+            className: 'dshcm-btn' + (selectedInfo && selectedInfo.queue ? ' dshcm-btn-off' : ''),
+            disabled: state.queueBusy || !state.selected,
+            onClick: () => toggleQueue(!(selectedInfo && selectedInfo.queue))
+          }, state.queueBusy
+            ? t('queueBusy')
+            : (selectedInfo && selectedInfo.queue ? t('queueDisable') : t('queueEnable')))
         ]),
         state.patchMsg ? el('div', { key: 'pm', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.patchMsg) : null,
         state.patchError ? el('div', { key: 'pe', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.patchError) : null,

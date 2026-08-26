@@ -88,10 +88,60 @@ const RESERVED_HEADERS = ['user-agent']; // attribution default; an explicit pro
 const RETRYABLE_STATUS = /\b(429|500|502|503|504|520|521|522|523|524|529)\b/;
 const TEST_ATTEMPTS = 3;
 const TEST_RETRY_BASE_MS = 1500;
+/** How long `test` rides the queue before reporting (see QUEUE_RETRY_POLICY). */
+const TEST_QUEUE_ATTEMPTS = 10;
+
+/**
+ * Queue-adaptive retry policy written to a provider profile when the user turns
+ * "queue" on. anyrouter-style relays reject every request with 503/429 while
+ * their channel pool is empty; a real Claude Code CLI outwaits that by
+ * retrying for minutes. The already-enabled dsh-llm-retry plugin executes this
+ * policy on the agent loop's failed-step extension point, so an agent turn
+ * keeps the request in the queue instead of failing after ~30s (the default
+ * policy is 5 retries at 500ms→10s).
+ *
+ * Values: 10 retries with exponential backoff 1s→30s (with jitter), covering
+ * the failure codes pi-ai maps a relay rejection to (RATE_LIMIT for 429,
+ * SERVER for 5xx, plus transport/timeout/empty-response). Cumulative wait is
+ * roughly 2-3 minutes — long enough to ride out a typical relay queue, short
+ * enough that a genuinely dead route fails loudly instead of hanging forever.
+ */
+const QUEUE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'];
+const QUEUE_RETRY_POLICY = {
+  mode: 'normal',
+  maxRetries: 10,
+  retryableCodes: QUEUE_RETRYABLE_CODES,
+  backoff: {
+    initialDelayMs: 1000,
+    maxDelayMs: 30000,
+    jitterRatio: 0.3
+  }
+};
 
 const sleep = (ms) => new Promise((resolve) => {
   if (typeof setTimeout === 'function') setTimeout(resolve, ms); else resolve();
 });
+
+/** The queue backoff shape the dsh-llm-retry plugin uses (same formula). */
+const queueDelay = (retry) => {
+  const exponent = Math.min(retry - 1, 1024);
+  const exponential = Math.min(QUEUE_RETRY_POLICY.backoff.initialDelayMs * 2 ** exponent, QUEUE_RETRY_POLICY.backoff.maxDelayMs);
+  const jitter = 1 - QUEUE_RETRY_POLICY.backoff.jitterRatio + 2 * QUEUE_RETRY_POLICY.backoff.jitterRatio * Math.random();
+  return Math.min(exponential * jitter, QUEUE_RETRY_POLICY.backoff.maxDelayMs);
+};
+
+/** Read the provider's configured retryPolicy (any object shape). */
+function retryPolicyOf(profile) {
+  if (profile === undefined || profile === null || typeof profile !== 'object') return undefined;
+  const rp = profile.retryPolicy;
+  return rp && typeof rp === 'object' ? rp : undefined;
+}
+
+/** Is this profile queue-adapted (i.e. does it carry any retry policy)? */
+function isQueueAdapted(profile) {
+  const rp = retryPolicyOf(profile);
+  return rp !== undefined && typeof rp.mode === 'string' && rp.mode.length > 0;
+}
 
 /**
  * Turn one gateway rejection into something actionable, and — crucially — say
@@ -131,16 +181,18 @@ function classifyCallError(callError) {
       hintZh: '网关校验了 Claude Code 请求体结构并拒绝；仅靠请求头伪装不够，需要请求体级别的模拟（超出本插件范围）'
     };
   }
-  // No upstream channel / model pool exhausted. new-api relays say this
-  // explicitly ("get_channel_failed", "负载已经达到上限", "无可用渠道"), and a
-  // bare "Service Unavailable" under 429/503 is the same condition obfuscated.
-  const noChannel = /get_channel_failed|无可用渠道|负载已经达到上限|当前分组.*(负载|无可用)|no available channel/i.test(text);
-  if (noChannel || RETRYABLE_STATUS.test(text)) {
+  // No upstream channel / model pool exhausted. anyrouter-style relays queue
+  // instead of failing: while the channel pool is empty they answer 429 or 503
+  // with a bare "Service Unavailable" (or the new-api "get_channel_failed" /
+  // "负载已经达到上限" text), and a client that keeps retrying with backoff
+  // eventually gets through. That is a queue, not a disguise problem.
+  const queued = /get_channel_failed|无可用渠道|负载已经达到上限|当前分组.*(负载|无可用)|no available channel/i.test(text);
+  if (queued || RETRYABLE_STATUS.test(text)) {
     return {
-      category: noChannel ? 'no-upstream-channel' : 'upstream-saturated',
+      category: 'queued',
       disguiseImplicated: false,
-      hint: 'the gateway has no healthy upstream channel for this model right now (it answers a real Claude Code CLI the same way), so this is server-side state and NOT a disguise problem — retry later, or try another model/route; verify independently with the same key in Claude Code',
-      hintZh: '网关当前对该模型没有可用的上游渠道（对真实 Claude Code CLI 也是同样结果），属服务端状态，与伪装无关——稍后重试或换模型/线路；可用同一个 Key 在 Claude Code 里交叉验证'
+      hint: 'the gateway is queuing — its upstream Claude channels are all busy right now and it answers a real Claude Code CLI the same way. Retrying with backoff eventually gets through; enable the provider queue policy (mask_client action=queue state=on provider=…) so agent turns outwait the queue instead of failing after the default ~30s',
+      hintZh: '网关正在排队——其上游 Claude 渠道当前全部繁忙（对真实 Claude Code CLI 也是同样结果）。带退避重试最终能通过；请为该 provider 开启排队适配（mask_client action=queue state=on provider=…），让 agent 请求能等到渠道空闲，而不是在默认约 30 秒后就失败'
     };
   }
   return { category: 'other', disguiseImplicated: false, hint: '', hintZh: '' };
@@ -309,6 +361,7 @@ async function apply(ctx) {
       const profile = map[id];
       const headers = headersOf(profile);
       const detected = detectPresetDetailed(headers);
+      const rp = retryPolicyOf(profile);
       return {
         id: id,
         displayName: profile && typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
@@ -316,6 +369,15 @@ async function apply(ctx) {
         // An older plugin version wrote this disguise; the client version it
         // claims is out of date, so re-applying the preset may be required.
         stale: detected.stale,
+        // anyrouter-style relays queue while channels are busy; the queue
+        // policy tells dsh-llm-retry to keep retrying (see QUEUE_RETRY_POLICY).
+        queue: isQueueAdapted(profile),
+        retryPolicy: rp === undefined ? null : {
+          mode: typeof rp.mode === 'string' ? rp.mode : null,
+          maxRetries: typeof rp.maxRetries === 'number' ? rp.maxRetries : null,
+          maxDelayMs: rp.backoff !== null && typeof rp.backoff === 'object' && typeof rp.backoff.maxDelayMs === 'number' ? rp.backoff.maxDelayMs : null,
+          retryableCodes: Array.isArray(rp.retryableCodes) ? rp.retryableCodes.map(String) : []
+        },
         headers: Object.keys(headers).map((name) => ({ name: name, value: String(headers[name]) }))
       };
     });
@@ -377,6 +439,45 @@ async function apply(ctx) {
     return { provider: providerId, preset: null, headers: filtered };
   };
 
+  /**
+   * Turn the queue-adaptation policy for a provider on or off.
+   *
+   * The policy lives in the provider profile (`retryPolicy`) and is executed by
+   * the already-enabled dsh-llm-retry plugin on every failed agent step: while
+   * anyrouter-style relays queue (429/503 "Service Unavailable"), the agent
+   * keeps retrying with exponential backoff instead of failing after ~30s.
+   *
+   * @param {string} providerId - pi-ai provider route id.
+   * @param {boolean} enabled - true writes the policy, false removes it.
+   * @param {{retries?: number, maxdelay?: number}} [override] - optional policy
+   *   overrides for maxRetries and backoff.maxDelayMs (ms).
+   * @returns {{ provider: string, queue: boolean, retryPolicy: object|null }}
+   */
+  const setQueuePolicy = async (providerId, enabled, override) => {
+    const map = providersMap();
+    requireProvider(map, providerId);
+    if (!settings.writable) throw new Error('settings are not writable in this deployment');
+    if (!enabled) {
+      await settings.mutate(NS, [{ op: 'unset', path: ['providers', providerId, 'retryPolicy'] }]);
+      return { provider: providerId, queue: false, retryPolicy: null };
+    }
+    const o = override === undefined || override === null ? {} : override;
+    const retries = typeof o.retries === 'number' && Number.isFinite(o.retries) && o.retries >= 0 ? o.retries : QUEUE_RETRY_POLICY.maxRetries;
+    const maxDelay = typeof o.maxdelay === 'number' && Number.isFinite(o.maxdelay) && o.maxdelay > 0 ? o.maxdelay : QUEUE_RETRY_POLICY.backoff.maxDelayMs;
+    const policy = {
+      mode: 'normal',
+      maxRetries: retries,
+      retryableCodes: QUEUE_RETRY_POLICY.retryableCodes.slice(),
+      backoff: {
+        initialDelayMs: QUEUE_RETRY_POLICY.backoff.initialDelayMs,
+        maxDelayMs: maxDelay,
+        jitterRatio: QUEUE_RETRY_POLICY.backoff.jitterRatio
+      }
+    };
+    await settings.mutate(NS, [{ op: 'set', path: ['providers', providerId, 'retryPolicy'], value: policy }]);
+    return { provider: providerId, queue: true, retryPolicy: policy };
+  };
+
   /** One real streaming call through the route; never throws, always reports. */
   const callOnce = async (providerId, chosen, signal) => {
     const llm = ctx.get('llm');
@@ -429,16 +530,20 @@ async function apply(ctx) {
     const models = profile.models && Array.isArray(profile.models) ? profile.models : [];
     const chosen = modelId || (models.length > 0 && models[0] && models[0].id ? models[0].id : '');
     if (!chosen) return { ok: false, error: 'provider has no models configured; pass model explicitly' };
-    // A saturated relay answers a transient 5xx/429 to a single shot, so retry
-    // with linear backoff before reporting anything about the disguise.
+    // anyrouter-style relays QUEUE while their channels are busy: they reject
+    // every shot with 429/503 ("Service Unavailable") and a client that keeps
+    // retrying with exponential backoff eventually gets through. Ride the queue
+    // for up to ~2-3 minutes (abortable via the caller's signal) before
+    // reporting anything about the disguise.
+    const maxAttempts = TEST_QUEUE_ATTEMPTS;
     let result = null;
     let attempts = 0;
-    while (attempts < TEST_ATTEMPTS) {
+    while (attempts < maxAttempts) {
       attempts += 1;
       result = await callOnce(providerId, chosen, signal);
       if (result.callError === null || !RETRYABLE_STATUS.test(result.callError)) break;
       if (signal && signal.aborted) break;
-      if (attempts < TEST_ATTEMPTS) await sleep(TEST_RETRY_BASE_MS * attempts);
+      if (attempts < maxAttempts) await sleep(queueDelay(attempts));
     }
     const callError = result.callError;
     const classification = callError === null ? null : classifyCallError(callError);
@@ -514,6 +619,31 @@ async function apply(ctx) {
         return { ok: false, error: String(e && e.message ? e.message : e) };
       }
     }
+    if (action === 'queue') {
+      const providerId = args && args.provider ? String(args.provider) : '';
+      if (!providerId) return { ok: false, error: 'provider is required' };
+      const state = args && args.state ? String(args.state) : 'on';
+      const override = {};
+      if (args && args.retries !== undefined && args.retries !== null && String(args.retries) !== '') {
+        const n = Number(args.retries);
+        override.retries = Number.isFinite(n) && n >= 0 ? n : undefined;
+      }
+      if (args && args.maxdelay !== undefined && args.maxdelay !== null && String(args.maxdelay) !== '') {
+        const n = Number(args.maxdelay);
+        override.maxdelay = Number.isFinite(n) && n > 0 ? n : undefined;
+      }
+      try {
+        if (state === 'off') {
+          const cleared = await setQueuePolicy(providerId, false, undefined);
+          return { ok: true, message: 'provider "' + providerId + '" queue policy cleared; retries fall back to the harness default', applied: cleared };
+        }
+        if (state !== 'on') return { ok: false, error: 'state must be on or off' };
+        const applied = await setQueuePolicy(providerId, true, override);
+        return { ok: true, message: 'provider "' + providerId + '" queue policy enabled: agent turns now retry 429/503 with backoff (maxRetries=' + applied.retryPolicy.maxRetries + ', maxDelay=' + applied.retryPolicy.backoff.maxDelayMs + 'ms)', applied: applied };
+      } catch (e) {
+        return { ok: false, error: String(e && e.message ? e.message : e) };
+      }
+    }
     return { ok: false, error: 'unknown action "' + action + '"' };
   };
 
@@ -523,11 +653,14 @@ async function apply(ctx) {
     const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, or clear the disguise. Use list to see configured routes, the pi-ai user-agent patch state, and their current disguise (stale=true means an older preset that should be re-applied); test makes one real streaming call, retries transient 429/5xx, and classifies the rejection — reporting disguiseImplicated=false when the gateway simply has no upstream channel (it would reject a real Claude Code CLI too); patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps, so agent turns outwait the queue instead of failing after the default ~30s. list shows routes, the pi-ai user-agent patch state, current disguise (stale=true means an older preset that should be re-applied) and whether the queue policy is on; test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call; patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
-        provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test)' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
+        provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/queue)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
+        state: { type: 'string', enum: ['on', 'off'], description: 'queue policy state (required for action=queue; default on)' },
+        retries: { type: 'string', description: 'queue policy maxRetries override (action=queue state=on)' },
+        maxdelay: { type: 'string', description: 'queue policy backoff.maxDelayMs override in ms (action=queue state=on)' },
         model: { type: 'string', description: "model id to test (defaults to the provider's first configured model)" },
         headersJson: { type: 'string', description: 'optional JSON object of extra headers to merge (custom preset, or to override preset values)' }
       },

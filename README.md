@@ -107,13 +107,31 @@ pi-ai 适配器（`dsh-llm-pi-ai`）的 provider 配置原生支持 `headers` �
 | `auth` (401/403) | `true` | 凭证或客户端身份被拒：检查 Key；确认 pi-ai 补丁已应用并重启 |
 | `policy-gate` (400 + `请启用 1m 上下文`) | `true` | 缺 beta 声明头：重新应用新版 `claude-code` 预设（已内置完整 `anthropic-beta`） |
 | `shape-validation` | `true` | 网关校验请求体结构：仅靠请求头无法满足，超出本插件范围 |
-| `no-upstream-channel` / `upstream-saturated`（503、或 429 + `Service Unavailable`、`get_channel_failed`、`负载已经达到上限`） | **`false`** | **与伪装无关**：网关当前没有可用上游渠道。稍后重试、换模型或换线路 |
+| `queued`（503、或 429 + `Service Unavailable`、`get_channel_failed`、`负载已经达到上限`） | **`false`** | **网关在排队**（上游渠道全忙，对真实 Claude Code CLI 同样返回）。带退避重试最终能通过；为 provider 开启**排队适配**（见下）让 agent 请求等得起 |
 
 > 交叉验证的可靠办法：把**同一个 Key** 填进 Claude Code（`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`）跑一次。如果 Claude Code 同样报错，问题在网关侧，不在伪装。注意这类中转站常给不同 Key 分配不同渠道分组，**Claude Code 里能用的那个 Key，未必等于 DSH 里配置的那个**——先确认两边用的是同一个 Key。
 
+## 排队适配（anyrouter 等网关）
+
+anyrouter 这类中转站**不直接拒绝，而是排队**：上游 Claude 渠道全忙时，对每个请求都回 429/503（`Service Unavailable`，或 openai 侧的 `get_channel_failed` / `负载已经达到上限`）。真实 Claude Code 之所以"能用"，是因为它会带退避重试数分钟，直到排到空闲渠道。
+
+DSH 侧已内置 `dsh-llm-retry` 插件：它在 agent 请求失败时按 **provider 的 `retryPolicy`** 决定是否重试。默认策略只重试 5 次、退避到 10s（总窗口约 30s），远不够排一个长队。本插件新增 `queue` 动作，把 provider 的 `retryPolicy` 改成排队策略：
+
+```text
+mask_client action=queue provider=anyrouter state=on            # 开启排队适配
+mask_client action=queue provider=anyrouter state=on retries=15 maxdelay=60000   # 自定义
+mask_client action=queue provider=anyrouter state=off           # 关闭，回落到默认策略
+```
+
+- 默认策略：`maxRetries=10`、退避 1s→30s（指数 + 抖动）、可重试码覆盖 `RATE_LIMIT`（429）与 `SERVER`（5xx）等，累计等待约 2-3 分钟——足以排过典型的长队，又不至于让真正死掉的线路挂住不报错。
+- `list` 会显示每个 provider 的排队状态（`queue: true/false` + 策略摘要）；设置页也有 **排队适配** 开关。
+- `test` 动作同样会**带退避骑队列**（最多约 2-3 分钟，可被调用方中断），而不是试两三次就报失败；最终仍失败时返回 `classification: queued`、`disguiseImplicated: false`。
+
+> 注意：策略写入的是设置文档，pi-ai 适配器每次请求都会重新读取 profile，因此**无需重启**即可对下一次 agent 请求生效（插件本体升级仍需重启 `dsh web`）。
+
 ## 使用 / Usage
 
-**设置页**：选择 provider → 点 **Claude Code / Codex / Off**，或 **Test call** 验证伪装是否生效。
+**设置页**：选择 provider → 点 **Claude Code / Codex / Off**，或 **Test call** 验证伪装是否生效；**排队适配**开关控制该 provider 的排队重试策略。
 
 **模型工具 `mask_client`**：
 
@@ -123,11 +141,14 @@ mask_client action=on provider=agen-openai preset=codex
 mask_client action=on provider=agen-openai preset=custom headersJson={"originator":"codex-tui"}
 mask_client action=off provider=agen-openai
 mask_client action=test provider=agen-openai
+mask_client action=queue provider=anyrouter state=on
+mask_client action=queue provider=anyrouter state=off
 ```
 
 - `on` 采用合并语义：保留你原有的其他请求头，仅覆盖预设拥有的键；`headersJson` 可追加/覆盖任意头。
 - `off` 只删除预设拥有的键，你手工配置的头会保留。
-- `test` 通过 `ctx.llm.stream` 真实调用该路由（默认用 provider 的第一个模型，可用 `model=` 指定），返回 `effectiveWireHeaders`（线上实际收到的头）、模型首段输出或网关报错；瞬时 429/5xx 会自动重试若干次，并附上 `classification` / `disguiseImplicated`（见上一节）。
+- `test` 通过 `ctx.llm.stream` 真实调用该路由（默认用 provider 的第一个模型，可用 `model=` 指定），返回 `effectiveWireHeaders`（线上实际收到的头）、模型首段输出或网关报错；会带退避重试以骑过排队窗口，并附上 `classification` / `disguiseImplicated`（见上一节）。
+- `queue` 写/删 provider 的 `retryPolicy`（`state=on|off`，可选 `retries=`、`maxdelay=` 覆盖）。
 
 ## 仓库结构 / Repository layout
 
@@ -145,7 +166,7 @@ mask_client action=test provider=agen-openai
 - 预设现在包含 `user-agent`；未打 `patches/` 补丁时，`user-agent` 仍会被归属机制覆盖（其余身份头不受影响）。此时 `test` 会额外返回 `warning`，明确告知伪装 UA 实际没有上线。
 - 伪装头会真实写入设置文档并持久化；停用插件不会自动撤销，需要执行 `off` 或清除 provider 的 `headers` 字段。
 - **只做请求头级伪装**。若网关校验请求体结构（system prompt 身份块、`metadata.user_id`、工具列表等），仅靠本插件不足以通过。
-- **不能修复网关侧问题**。上游渠道耗尽、限流、欠费等状态对真实 Claude Code 同样报错；`disguiseImplicated: false` 即为此类，改请求头无用。
+- **排队不等于失败**：上游渠道耗尽时的 429/503 对真实 Claude Code 同样返回，`disguiseImplicated: false` 即为此类。开启 `queue` 策略后 agent 会带退避重试骑过排队窗口；若排队时间超过策略窗口（默认约 2-3 分钟，可用 `retries=`/`maxdelay=` 加长），请求仍会失败——此时只能等待或换模型/线路。
 
 ## License
 

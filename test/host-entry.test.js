@@ -76,10 +76,11 @@ for (const [variant, file] of HALVES) {
       `${file}: 429 must be retryable — these relays answer 429 with a bare "Service Unavailable"`);
   });
 
-  test(`${variant} retries a transient rejection before judging the disguise`, () => {
+  test(`${variant} rides the gateway queue before judging the disguise`, () => {
     const src = read(file);
-    assert.ok(src.includes('TEST_ATTEMPTS'), `${file}: must define a retry budget`);
-    assert.ok(src.includes('while (attempts < TEST_ATTEMPTS)'), `${file}: test must retry`);
+    assert.ok(src.includes('TEST_QUEUE_ATTEMPTS'), `${file}: must define a queue-riding retry budget`);
+    assert.ok(src.includes('while (attempts < maxAttempts)'), `${file}: test must retry`);
+    assert.ok(src.includes('queueDelay'), `${file}: retries must use the queue backoff`);
   });
 
   // An upgraded plugin must not silently mislabel an old disguise as "custom".
@@ -118,16 +119,21 @@ test('detectPresetDetailed distinguishes exact, stale, custom and empty', () => 
   );
   assert.deepEqual(detectPresetDetailed({ 'x-custom': '1' }), { active: 'custom', stale: false });
 
-  // The exact rejections observed from anyrouter.top during diagnosis.
-  const saturated = classifyCallError('503 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
-  assert.equal(saturated.category, 'upstream-saturated');
-  assert.equal(saturated.disguiseImplicated, false);
+  // The exact rejections observed from anyrouter.top during diagnosis. A 503 /
+  // 429 "Service Unavailable" is the relay QUEUEING (no free upstream channel):
+  // retrying with backoff eventually gets through, and it is never a disguise
+  // fault — a real Claude Code CLI gets the identical rejection.
+  const queued = classifyCallError('503 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
+  assert.equal(queued.category, 'queued');
+  assert.equal(queued.disguiseImplicated, false);
+  assert.ok(queued.hint.includes('queue'), 'the hint must point at the queue mechanism');
 
   const throttled = classifyCallError('429 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
-  assert.equal(throttled.disguiseImplicated, false, '429 + "Service Unavailable" is a channel shortage, not a disguise fault');
+  assert.equal(throttled.category, 'queued');
+  assert.equal(throttled.disguiseImplicated, false, '429 + "Service Unavailable" is the relay queueing, not a disguise fault');
 
   const noChannel = classifyCallError('500 当前模型 gpt-5.6-sol 负载已经达到上限，请稍后重试 code:get_channel_failed');
-  assert.equal(noChannel.category, 'no-upstream-channel');
+  assert.equal(noChannel.category, 'queued');
   assert.equal(noChannel.disguiseImplicated, false);
 
   const gate = classifyCallError('400 {"error":"1m 上下文已经全量可用，请启用 1m 上下文后重试"}');
@@ -137,6 +143,55 @@ test('detectPresetDetailed distinguishes exact, stale, custom and empty', () => 
   const auth = classifyCallError('401 UNAUTHENTICATED');
   assert.equal(auth.category, 'auth');
   assert.equal(auth.disguiseImplicated, true);
+});
+
+// anyrouter-style relays queue while their channel pool is empty; the provider
+// retryPolicy (executed by the enabled dsh-llm-retry plugin) is what lets agent
+// turns outwait that queue instead of failing after the default ~30s window.
+test('queue-adaptive retry policy ships valid values for the dsh-llm-retry plugin', () => {
+  const src = read('index.js');
+  const cut = src.indexOf('/** Resolve the installed');
+  const sandbox = { module: { exports: {} }, require, console };
+  const factory = new Function('module', 'require', 'console',
+    src.slice(src.indexOf('const CLAUDE_CLI_VERSION'), cut) +
+    '\nmodule.exports = { QUEUE_RETRY_POLICY, QUEUE_RETRYABLE_CODES, queueDelay, retryPolicyOf, isQueueAdapted };');
+  factory(sandbox.module, require, console);
+  const { QUEUE_RETRY_POLICY, QUEUE_RETRYABLE_CODES, queueDelay, retryPolicyOf, isQueueAdapted } = sandbox.module.exports;
+
+  // The schema in @deepseek-ai/dsh-llm's RetryPolicySchema: normal mode with
+  // maxRetries / retryableCodes / backoff{initialDelayMs,maxDelayMs,jitterRatio}.
+  assert.equal(QUEUE_RETRY_POLICY.mode, 'normal');
+  assert.ok(Number.isInteger(QUEUE_RETRY_POLICY.maxRetries) && QUEUE_RETRY_POLICY.maxRetries > 0);
+  assert.ok(QUEUE_RETRYABLE_CODES.includes('RATE_LIMIT'), '429 maps to RATE_LIMIT in the pi-ai adapter');
+  assert.ok(QUEUE_RETRYABLE_CODES.includes('SERVER'), '5xx maps to SERVER in the pi-ai adapter');
+  assert.ok(QUEUE_RETRYABLE_CODES.includes('TIMEOUT') && QUEUE_RETRYABLE_CODES.includes('TRANSPORT'));
+  assert.ok(QUEUE_RETRY_POLICY.backoff.initialDelayMs >= 500);
+  assert.ok(QUEUE_RETRY_POLICY.backoff.maxDelayMs >= 10000, 'must outlast the default 10s cap');
+  assert.ok(QUEUE_RETRY_POLICY.backoff.jitterRatio > 0 && QUEUE_RETRY_POLICY.backoff.jitterRatio <= 1);
+
+  // The backoff mirrors dsh-llm-retry's localDelay formula: exponential with jitter, capped.
+  const d1 = queueDelay(1);
+  const d2 = queueDelay(2);
+  assert.ok(d1 >= QUEUE_RETRY_POLICY.backoff.initialDelayMs * 0.7);
+  assert.ok(d2 >= d1 * 1.3, 'exponential growth between consecutive retries');
+  assert.ok(d1 <= QUEUE_RETRY_POLICY.backoff.maxDelayMs && d2 <= QUEUE_RETRY_POLICY.backoff.maxDelayMs);
+
+  // The policy must be detectable from a profile and settable via the queue action.
+  const adapted = { retryPolicy: { mode: 'normal', maxRetries: 10, retryableCodes: [], backoff: {} } };
+  assert.equal(isQueueAdapted(adapted), true);
+  assert.equal(isQueueAdapted({}), false);
+  assert.equal(isQueueAdapted(undefined), false);
+  assert.deepEqual(retryPolicyOf(adapted), adapted.retryPolicy);
+});
+
+test('queue action wiring exists in both host halves', () => {
+  for (const file of ['index.js', 'host.body.js']) {
+    const src = read(file);
+    assert.ok(src.includes("action === 'queue'"), `${file}: run() must handle action=queue`);
+    assert.ok(src.includes("setQueuePolicy"), `${file}: must define setQueuePolicy`);
+    assert.ok(src.includes("['providers', providerId, 'retryPolicy']"), `${file}: must write providers.<id>.retryPolicy`);
+    assert.ok(src.includes('retryableCodes'), `${file}: the policy must carry retryableCodes`);
+  }
 });
 
 // Switching presets must never leave a previous preset's identity headers
