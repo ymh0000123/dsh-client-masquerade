@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({
 				provider: 'Provider',
 				status: 'Status',
 				masquerading: 'masquerading as {preset}',
+				staleSuffix: ' (outdated preset — click it again to refresh)',
+				gatewayFault: 'Gateway rejected it, but not because of the disguise: {hint}',
 				none: 'no disguise',
 				dash: '—',
 				off: 'Off',
@@ -51,6 +53,8 @@ window.__ModuleLoader__.load({
 				provider: 'Provider',
 				status: '状态',
 				masquerading: '伪装为 {preset}',
+				staleSuffix: '（预设已过期——再点一次以刷新）',
+				gatewayFault: '网关拒绝了请求，但与伪装无关：{hint}',
 				none: '未伪装',
 				dash: '—',
 				off: '关闭',
@@ -216,9 +220,25 @@ window.__ModuleLoader__.load({
 						.then((res) => {
 							if (res && res.ok) {
 								setState((s) => Object.assign({}, s, { busy: false, message: t('testOk', { text: res.firstText || t('noText') }) }));
-							} else {
-								setState((s) => Object.assign({}, s, { busy: false, error: res && res.callError ? res.callError : (res && res.error ? res.error : t('requestFailed')) }));
+								return;
 							}
+							// A saturated relay rejects a real Claude Code CLI the same way, so
+							// don't let the user read this as a broken disguise.
+							const raw = res && res.callError ? res.callError : (res && res.error ? res.error : t('requestFailed'));
+							if (res && res.disguiseImplicated === false) {
+								// Prefer the localized hint; the snapshot's `active` is the locale id.
+								const snapshot = locale !== undefined ? locale.getLocale() : undefined;
+								const activeId = snapshot && typeof snapshot.active === 'string' ? snapshot.active : '';
+								const zh = activeId.toLowerCase().indexOf('zh') === 0;
+								const hint = zh && res.hintZh ? res.hintZh : (res.hint || '');
+								setState((s) => Object.assign({}, s, {
+									busy: false,
+									error: '',
+									message: t('gatewayFault', { hint: hint || raw })
+								}));
+								return;
+							}
+							setState((s) => Object.assign({}, s, { busy: false, error: raw }));
 						})
 						.catch((err) => {
 							setState((s) => Object.assign({}, s, { busy: false, error: String(err && err.message ? err.message : err) }));
@@ -227,7 +247,9 @@ window.__ModuleLoader__.load({
 
 				const selectedInfo = state.providers.find((p) => p.id === state.selected);
 				const statusText = selectedInfo
-					? (selectedInfo.active ? t('masquerading', { preset: t('preset.' + selectedInfo.active) }) : t('none'))
+					? (selectedInfo.active
+						? t('masquerading', { preset: t('preset.' + selectedInfo.active) }) + (selectedInfo.stale ? t('staleSuffix') : '')
+						: t('none'))
 					: t('dash');
 				const headerRows = selectedInfo && selectedInfo.headers.length > 0
 					? selectedInfo.headers.map((h) => el('div', { key: h.name, style: { fontSize: '11px', opacity: 0.75, fontFamily: 'monospace' } }, h.name + ': ' + h.value))

@@ -87,11 +87,29 @@ pi-ai 适配器（`dsh-llm-pi-ai`）的 provider 配置原生支持 `headers` �
 
 | 预设 | 写入的请求头 |
 | --- | --- |
-| `claude-code` | `user-agent: claude-cli/2.0.0 (external, cli)`、`anthropic-client: claude-code/2.0.0`、`x-app: cli`、`x-stainless-*` 系列 |
+| `claude-code` | `user-agent: claude-cli/2.1.241 (external, cli)`、`anthropic-client: claude-code/2.1.241`、`anthropic-version`、`anthropic-beta`（含 `context-1m-2025-08-07` 等完整列表）、`anthropic-dangerous-direct-browser-access`、`x-app: cli`、`x-stainless-*` 系列 |
 | `codex` | `user-agent: codex-tui/0.145.0 (...)`、`openai-client: codex/0.48.0`、`x-stainless-*` 系列 |
 | `custom` | 任意（通过 `headersJson` 传入） |
 
+> `claude-code` 预设的取值来自**实测抓包**：用本地反代把真实 `claude-cli 2.1.241` 的请求拦下来，逐个头比对后写入。网关普遍按 `claude-cli` 版本号放行，所以升级插件后建议**重新点一次 Claude Code** 让预设刷新（设置页会把旧预设标为「预设已过期」）。
+> 按设计**不伪装** `x-claude-code-session-id`：它是每会话随机 UUID，写成固定值反而是更糟的指纹。
+
 > 为什么需要补丁：原生 `dsh-llm-pi-ai` 会把 profile 的 `user-agent` 剥离并强制覆盖为 `deepseek-harness/...`，导致按 User-Agent 识别客户端的网关（如 agentrouter）拒绝请求（401 UNAUTHENTICATED）。`patches/apply-pi-ai-useragent-patch.mjs` 会把安装目录里 `@deepseek-ai/dsh-llm-pi-ai/lib/index.js` 的 `requestHeaders` 改为：显式配置的 profile `user-agent` 优先上线，未配置时回落归属 User-Agent。重装/升级 `dsh-llm-pi-ai` 后需重新应用。
+
+## 排错：分清「伪装没生效」和「网关自己不行」
+
+这是本插件最容易被误判的一点。中转网关（new-api / one-api 系，anyrouter、agentrouter 等）在**上游渠道耗尽**时，会对**真实的 Claude Code CLI 也返回同样的错误**——此时无论怎么调请求头都不会好转。
+
+`mask_client action=test` 会自动重试瞬时错误，并给出 `classification` 与 `disguiseImplicated` 两个字段，直接告诉你该往哪修：
+
+| classification | disguiseImplicated | 含义与处置 |
+| --- | --- | --- |
+| `auth` (401/403) | `true` | 凭证或客户端身份被拒：检查 Key；确认 pi-ai 补丁已应用并重启 |
+| `policy-gate` (400 + `请启用 1m 上下文`) | `true` | 缺 beta 声明头：重新应用新版 `claude-code` 预设（已内置完整 `anthropic-beta`） |
+| `shape-validation` | `true` | 网关校验请求体结构：仅靠请求头无法满足，超出本插件范围 |
+| `no-upstream-channel` / `upstream-saturated`（503、或 429 + `Service Unavailable`、`get_channel_failed`、`负载已经达到上限`） | **`false`** | **与伪装无关**：网关当前没有可用上游渠道。稍后重试、换模型或换线路 |
+
+> 交叉验证的可靠办法：把**同一个 Key** 填进 Claude Code（`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`）跑一次。如果 Claude Code 同样报错，问题在网关侧，不在伪装。注意这类中转站常给不同 Key 分配不同渠道分组，**Claude Code 里能用的那个 Key，未必等于 DSH 里配置的那个**——先确认两边用的是同一个 Key。
 
 ## 使用 / Usage
 
@@ -109,7 +127,7 @@ mask_client action=test provider=agen-openai
 
 - `on` 采用合并语义：保留你原有的其他请求头，仅覆盖预设拥有的键；`headersJson` 可追加/覆盖任意头。
 - `off` 只删除预设拥有的键，你手工配置的头会保留。
-- `test` 通过 `ctx.llm.stream` 真实调用该路由（默认用 provider 的第一个模型，可用 `model=` 指定），返回 `effectiveWireHeaders`（线上实际收到的头）、模型首段输出或网关报错。
+- `test` 通过 `ctx.llm.stream` 真实调用该路由（默认用 provider 的第一个模型，可用 `model=` 指定），返回 `effectiveWireHeaders`（线上实际收到的头）、模型首段输出或网关报错；瞬时 429/5xx 会自动重试若干次，并附上 `classification` / `disguiseImplicated`（见上一节）。
 
 ## 仓库结构 / Repository layout
 
@@ -124,8 +142,10 @@ mask_client action=test provider=agen-openai
 ## 限制 / Limitations
 
 - 仅作用于 **`llm-pi-ai` 自定义 provider**；内置 `deepseek-official` 适配器没有请求头钩子，无法用此方式伪装。
-- 预设现在包含 `user-agent`；未打 `patches/` 补丁时，`user-agent` 仍会被归属机制覆盖（其余身份头不受影响）。
+- 预设现在包含 `user-agent`；未打 `patches/` 补丁时，`user-agent` 仍会被归属机制覆盖（其余身份头不受影响）。此时 `test` 会额外返回 `warning`，明确告知伪装 UA 实际没有上线。
 - 伪装头会真实写入设置文档并持久化；停用插件不会自动撤销，需要执行 `off` 或清除 provider 的 `headers` 字段。
+- **只做请求头级伪装**。若网关校验请求体结构（system prompt 身份块、`metadata.user_id`、工具列表等），仅靠本插件不足以通过。
+- **不能修复网关侧问题**。上游渠道耗尽、限流、欠费等状态对真实 Claude Code 同样报错；`disguiseImplicated: false` 即为此类，改请求头无用。
 
 ## License
 
