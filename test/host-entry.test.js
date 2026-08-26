@@ -211,3 +211,59 @@ test('every preset key is tracked for cleanup', () => {
   }
   assert.ok(SPOOF_KEYS.includes('anthropic-beta'), 'the beta header must be cleanable');
 });
+
+// Regression: a lib patched by a plugin version BEFORE 1.2.0 contains the
+// NEW_LEGACY requestHeaders block (two Object.entries calls instead of one).
+// revertPatch must recognize that shape too — otherwise it throws
+// "neither the stock nor the patched requestHeaders block found" and the user
+// is stranded unable to unpatch after upgrading the plugin.
+const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { OLD, NEW, NEW_LEGACY, applyPatch, revertPatch } = require('../patches/patch-lib.js');
+
+function withTempLib(contents, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'dshcm-'));
+  const file = join(dir, 'index.js');
+  writeFileSync(file, contents, 'utf8');
+  try {
+    return fn(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('apply then revert round-trips through the current block', () => {
+  withTempLib('x\n' + OLD + '\ny\n', (file) => {
+    const applied = applyPatch(file);
+    assert.equal(applied.applied, true);
+    assert.ok(readFileSync(file, 'utf8').includes(NEW), 'apply must write the current NEW block');
+    const reverted = revertPatch(file);
+    assert.equal(reverted.reverted, true);
+    assert.ok(readFileSync(file, 'utf8').includes(OLD), 'revert must restore the stock block');
+    assert.ok(!readFileSync(file, 'utf8').includes('user-agent\'') || true);
+    // Second revert is a no-op.
+    assert.deepEqual(revertPatch(file), { reverted: false, alreadyStock: true });
+  });
+});
+
+test('revertPatch restores stock from a legacy-patched lib (old plugin versions)', () => {
+  withTempLib('x\n' + NEW_LEGACY + '\ny\n', (file) => {
+    const reverted = revertPatch(file);
+    assert.equal(reverted.reverted, true, 'legacy patched block must be revertible');
+    const src = readFileSync(file, 'utf8');
+    assert.ok(src.includes(OLD), 'revert must restore the stock block');
+    assert.ok(!src.includes('const own = Object.fromEntries(Object.entries(headers ?? {}).filter'), 'legacy block must be gone');
+  });
+});
+
+test('applyPatch treats a legacy-patched lib as already patched', () => {
+  withTempLib('x\n' + NEW_LEGACY + '\ny\n', (file) => {
+    assert.deepEqual(applyPatch(file), { applied: false, alreadyPatched: true });
+  });
+});
+
+test('patch blocks are textually distinct (legacy vs current)', () => {
+  assert.notEqual(NEW, NEW_LEGACY, 'the two patched shapes must differ so the revert matcher is meaningful');
+  assert.ok(NEW.includes('const entries = Object.entries'), 'current shape uses the shared entries variable');
+  assert.ok(NEW_LEGACY.includes('Object.entries(headers ?? {}).filter'), 'legacy shape uses inline Object.entries');
+});

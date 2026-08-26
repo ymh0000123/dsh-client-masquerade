@@ -31,6 +31,8 @@ node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs
 
 补丁幂等，可重复执行；`pnpm install` 或升级 `dsh-llm-pi-ai` 后需重新应用一次。插件启动时也会自检：未打补丁会在日志打醒目的 `[client-masquerade] dsh-llm-pi-ai is NOT user-agent patched` 警告。
 
+> 兼容旧版：若 `dsh-llm-pi-ai` 的补丁是**旧版插件**（<1.2.0）写入的（requestHeaders 块是另一种等价写法），`还原` 也能正确识别并还原为原始版本；`应用` 会把它升级为当前版本的补丁形态。不再出现 "neither the stock nor the patched requestHeaders block found"。
+
 > 安装模式下也可以直接在网页设置页（Settings → Client Masquerade → **User-Agent 补丁 → 应用**）一键写入补丁，之后重启 `dsh web` 生效；动态模式无文件系统权限，仍需手动执行上面的命令。
 
 之后重启：
