@@ -511,13 +511,13 @@ return {
             registeredRoutes = [{ error: String(e && e.message ? e.message : e) }];
           }
         }
-        return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' } };
+        return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' }, variantPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the dsh-vision-toolkit variant patch; run node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs manually and restart' } };
       }
       if (action === 'patch') {
-        return { ok: false, error: 'dynamic mode cannot apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' };
+        return { ok: false, error: 'dynamic mode cannot apply the patches; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs and node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs manually and restart' };
       }
       if (action === 'unpatch') {
-        return { ok: false, error: 'dynamic mode cannot revert the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs --revert manually and restart' };
+        return { ok: false, error: 'dynamic mode cannot revert the patches; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs --revert and node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs --revert manually and restart' };
       }
       if (action === 'on') {
         const providerId = args && args.provider ? String(args.provider) : '';
@@ -582,9 +582,9 @@ return {
 
     ctx.effect(() => harness.registerTool(ctx, harness.defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps. list shows routes, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch applies the pi-ai user-agent patch (restart required).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps. list shows routes, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch applies both patches — the pi-ai user-agent patch and the dsh-vision-toolkit variant retry-forwarding patch (restart required; dynamic mode defers to the manual scripts).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + both patch states; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply both patches (pi-ai user-agent + vision-toolkit variant retry-forwarding; restart required); unpatch = revert both' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/queue)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
         state: { type: 'string', enum: ['on', 'off'], description: 'queue policy state (required for action=queue; default on)' },

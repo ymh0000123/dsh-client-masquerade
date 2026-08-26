@@ -46,6 +46,14 @@ window.__ModuleLoader__.load({
 				uaReverting: 'reverting…',
 				uaRevertedMsg: 'Patch reverted — restart dsh web to take effect.',
 				uaAlreadyStock: 'Patch already reverted.',
+				variantPatch: 'Vision-toolkit patch',
+				variantPatched: 'applied',
+				variantNotPatched: 'not applied',
+				variantSkipped: 'not installed',
+				patchesAppliedMsg: 'Patches written — restart dsh web to take effect.',
+				patchesAlready: 'Patches already applied.',
+				patchesRevertedMsg: 'Patches reverted — restart dsh web to take effect.',
+				patchesAlreadyStock: 'Patches already reverted.',
 				queue: 'Queue adaptation',
 				queueOn: 'Queued (retries {retries}×, up to {maxdelay}ms)',
 				queueOff: 'Off',
@@ -90,6 +98,14 @@ window.__ModuleLoader__.load({
 				uaReverting: '正在还原…',
 				uaRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
 				uaAlreadyStock: '补丁已是原状。',
+				variantPatch: 'Vision-toolkit 变体补丁',
+				variantPatched: '已应用',
+				variantNotPatched: '未应用',
+				variantSkipped: '未安装',
+				patchesAppliedMsg: '补丁已写入，重启 dsh web 后生效。',
+				patchesAlready: '补丁均已应用。',
+				patchesRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
+				patchesAlreadyStock: '补丁已是原状。',
 				queue: '排队适配',
 				queueOn: '已开启（重试 {retries} 次，最长 {maxdelay}ms）',
 				queueOff: '关闭',
@@ -146,7 +162,7 @@ window.__ModuleLoader__.load({
 				: (key, params) => interpolate(DICTS.en[key] !== undefined ? DICTS.en[key] : key, params);
 
 			function MaskPanel() {
-				const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false });
+				const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, variantPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false });
 				const [, setRev] = React.useState(0);
 
 				React.useEffect(() => {
@@ -164,7 +180,8 @@ window.__ModuleLoader__.load({
 							busy: false,
 							message: '',
 							error: '',
-							uaPatch: res && res.uaPatch ? res.uaPatch : null
+							uaPatch: res && res.uaPatch ? res.uaPatch : null,
+							variantPatch: res && res.variantPatch ? res.variantPatch : null
 						}));
 					}).catch((err) => {
 						setState((s) => Object.assign({}, s, { busy: false, error: String(err && err.message ? err.message : err) }));
@@ -178,10 +195,16 @@ window.__ModuleLoader__.load({
 					call({ action: 'patch' })
 						.then((res) => {
 							if (res && res.ok) {
+								const uaOk = res.uaPatch && res.uaPatch.ok !== false;
+								const vp = res.variantPatch;
+								const vpOk = vp && vp.ok !== false;
+								const allAlready = res.uaPatch && res.uaPatch.alreadyPatched === true
+									&& (!vp || vp.skipped === true || vp.alreadyPatched === true);
 								setState((s) => Object.assign({}, s, {
 									patchBusy: false,
-									uaPatch: res.alreadyPatched ? Object.assign({}, s.uaPatch, { patched: true }) : s.uaPatch,
-									patchMsg: res.alreadyPatched ? t('uaAlready') : t('uaAppliedMsg')
+									uaPatch: uaOk ? Object.assign({}, s.uaPatch, { patched: true }) : s.uaPatch,
+									variantPatch: vpOk ? Object.assign({}, s.variantPatch, { patched: vp.skipped ? null : true }) : s.variantPatch,
+									patchMsg: allAlready ? t('patchesAlready') : t('patchesAppliedMsg')
 								}));
 								return refresh();
 							}
@@ -197,10 +220,16 @@ window.__ModuleLoader__.load({
 					call({ action: 'unpatch' })
 						.then((res) => {
 							if (res && res.ok) {
+								const uaOk = res.uaPatch && res.uaPatch.ok !== false;
+								const vp = res.variantPatch;
+								const vpOk = vp && vp.ok !== false;
+								const allStock = res.uaPatch && res.uaPatch.alreadyStock === true
+									&& (!vp || vp.skipped === true || vp.alreadyStock === true);
 								setState((s) => Object.assign({}, s, {
 									patchBusy: false,
-									uaPatch: res.alreadyStock ? Object.assign({}, s.uaPatch, { patched: false }) : s.uaPatch,
-									patchMsg: res.alreadyStock ? t('uaAlreadyStock') : t('uaRevertedMsg')
+									uaPatch: uaOk ? Object.assign({}, s.uaPatch, { patched: false }) : s.uaPatch,
+									variantPatch: vpOk ? Object.assign({}, s.variantPatch, { patched: vp.skipped ? null : false }) : s.variantPatch,
+									patchMsg: allStock ? t('patchesAlreadyStock') : t('patchesRevertedMsg')
 								}));
 								return refresh();
 							}
@@ -310,6 +339,12 @@ window.__ModuleLoader__.load({
 							state.uaPatch === null ? t('dash')
 								: state.uaPatch.error !== undefined && state.uaPatch.error ? t('dash')
 								: state.uaPatch.patched ? t('uaPatched') : t('uaNotPatched')
+						)),
+						el('span', { key: 'vpl', style: { fontSize: '12px' } }, t('variantPatch') + ': ' + (
+							state.variantPatch === null ? t('dash')
+								: state.variantPatch.error !== undefined && state.variantPatch.error ? t('dash')
+								: state.variantPatch.patched === null ? t('variantSkipped')
+								: state.variantPatch.patched ? t('variantPatched') : t('variantNotPatched')
 						)),
 						state.uaPatch !== null && state.uaPatch.supported
 							? (state.uaPatch && state.uaPatch.patched

@@ -19,7 +19,7 @@ const API_PATH = '/dsh-client-masquerade/api';
 
 const { readFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
-const { applyPatch, revertPatch, MARKER: PATCH_MARKER, VARIANT_MARKER } = require('./patches/patch-lib.js');
+const { applyPatch, revertPatch, MARKER: PATCH_MARKER, VARIANT_MARKER, applyVariantRetryPatch, revertVariantRetryPatch } = require('./patches/patch-lib.js');
 
 /*
  * The claude-code preset mirrors a REAL Claude Code request, captured off the
@@ -290,6 +290,71 @@ function revertUserAgentPatch() {
   }
 }
 
+/**
+ * Inspect the dsh-vision-toolkit variant retry-forwarding patch state.
+ * supported=false when the package is not installed (nothing to patch).
+ */
+function variantPatchState() {
+  try {
+    const target = resolveVisionToolkitVariants();
+    if (target === undefined) {
+      return { supported: false, patched: null, error: '@anionex/dsh-vision-toolkit is not installed (variant patch not needed)' };
+    }
+    return { supported: true, patched: readFileSync(target, 'utf8').includes(VARIANT_MARKER), target: target };
+  } catch (e) {
+    return { supported: false, patched: null, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * Apply BOTH patches from the web settings page / tool action:
+ * 1. the pi-ai user-agent patch (profile user-agent reaches the wire), and
+ * 2. the dsh-vision-toolkit variant retry-forwarding patch (vision-toolkit-*
+ *    wrapper routes inherit the upstream queue policy; skipped when the
+ *    package is not installed).
+ * Each writing succeeds immediately but only takes effect after a `dsh web`
+ * restart (requestHeaders / variant registration are already in memory).
+ */
+function applyPatches() {
+  const ua = applyUserAgentPatch();
+  if (!ua.ok) return { ok: false, error: ua.error };
+  const result = { ok: true, uaPatch: ua };
+  const variantTarget = resolveVisionToolkitVariants();
+  if (variantTarget === undefined) {
+    result.variantPatch = { ok: true, skipped: true, alreadyPatched: false, restartRequired: false, target: null };
+  } else {
+    try {
+      const r = applyVariantRetryPatch(variantTarget);
+      result.variantPatch = { ok: true, skipped: false, alreadyPatched: r.alreadyPatched, restartRequired: !r.alreadyPatched, target: variantTarget };
+    } catch (e) {
+      result.variantPatch = { ok: false, error: String(e && e.message ? e.message : e), target: variantTarget };
+    }
+  }
+  return result;
+}
+
+/**
+ * Revert BOTH patches (clean uninstall support). Also requires a `dsh web`
+ * restart to take effect.
+ */
+function revertPatches() {
+  const ua = revertUserAgentPatch();
+  if (!ua.ok) return { ok: false, error: ua.error };
+  const result = { ok: true, uaPatch: ua };
+  const variantTarget = resolveVisionToolkitVariants();
+  if (variantTarget === undefined) {
+    result.variantPatch = { ok: true, skipped: true, alreadyStock: true, restartRequired: false, target: null };
+  } else {
+    try {
+      const r = revertVariantRetryPatch(variantTarget);
+      result.variantPatch = { ok: true, skipped: false, alreadyStock: r.alreadyStock, restartRequired: !r.alreadyStock, target: variantTarget };
+    } catch (e) {
+      result.variantPatch = { ok: false, error: String(e && e.message ? e.message : e), target: variantTarget };
+    }
+  }
+  return result;
+}
+
 /** Warn loudly when the pi-ai user-agent patch is missing (the #1 "disguise written but gateway 401" cause). */
 function checkUserAgentPatch() {
   const state = uaPatchState();
@@ -330,7 +395,7 @@ function checkVariantRetryPatch() {
     if (!src.includes(VARIANT_MARKER)) {
       console.warn(
         '[client-masquerade] dsh-vision-toolkit image-input variants are NOT retry-forwarding patched: vision-toolkit-<upstream> wrapper routes (e.g. vision-toolkit-anyrouter) fall back to the default 5-retry policy even when the upstream profile carries a queue retryPolicy. ' +
-        'Apply the variant retry patch (patches/patch-lib.js applyVariantRetryPatch on <vision-toolkit>/lib/image-input-variants.js) and restart dsh web.'
+        'Apply it from the Client Masquerade settings page (Patch applies both patches), or run (from your profile dir): node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs — then restart dsh web.'
       );
     }
   } catch (e) {
@@ -691,13 +756,13 @@ async function apply(ctx) {
           registeredRoutes = [{ error: String(e && e.message ? e.message : e) }];
         }
       }
-      return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: uaPatchState() };
+      return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: uaPatchState(), variantPatch: variantPatchState() };
     }
     if (action === 'patch') {
-      return applyUserAgentPatch();
+      return applyPatches();
     }
     if (action === 'unpatch') {
-      return revertUserAgentPatch();
+      return revertPatches();
     }
     if (action === 'on') {
       const providerId = args && args.provider ? String(args.provider) : '';
@@ -766,9 +831,9 @@ async function apply(ctx) {
     const { defineTool } = await import('@deepseek-ai/dsh-tools');
     ctx.effect(() => tools.register(defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps, so agent turns outwait the queue instead of failing after the default ~30s. list shows routes, the pi-ai user-agent patch state, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch/unpatch apply or revert the pi-ai user-agent patch (restart required).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps, so agent turns outwait the queue instead of failing after the default ~30s. list shows routes, the pi-ai user-agent patch state, the dsh-vision-toolkit variant retry-forwarding patch state, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch/unpatch apply or revert BOTH patches — the pi-ai user-agent patch and the dsh-vision-toolkit variant retry-forwarding patch (variant is skipped when vision-toolkit is not installed; restart required).',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + patch state; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply the pi-ai user-agent patch (restart required); unpatch = revert it' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + both patch states; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply both patches (pi-ai user-agent + vision-toolkit variant retry-forwarding; restart required); unpatch = revert both' },
         provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/queue)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
         state: { type: 'string', enum: ['on', 'off'], description: 'queue policy state (required for action=queue; default on)' },

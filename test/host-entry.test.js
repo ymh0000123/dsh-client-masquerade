@@ -326,3 +326,53 @@ test('list reports registeredRoutes (all llm routes incl. vision-toolkit variant
   }
 });
 
+// The one-click Patch button applies BOTH patches: the pi-ai user-agent patch
+// AND the vision-toolkit variant retry-forwarding patch, and list surfaces both
+// states so the user can verify the variant route will inherit the queue policy.
+test('patch/unpatch apply and revert both patches; list reports both states', () => {
+  const src = read('index.js');
+  assert.ok(src.includes("action === 'patch'"), 'run() must handle action=patch');
+  assert.ok(src.includes('return applyPatches()'), 'patch must call applyPatches (both patches)');
+  assert.ok(src.includes('return revertPatches()'), 'unpatch must call revertPatches (both patches)');
+  assert.ok(src.includes('variantPatch: variantPatchState()'), 'list must report the variant patch state');
+  assert.ok(src.includes('applyVariantRetryPatch'), 'index must import the variant apply');
+  assert.ok(src.includes('revertVariantRetryPatch'), 'index must import the variant revert');
+});
+
+test('applyPatches and revertPatches are defined and structurally symmetric', () => {
+  const src = read('index.js');
+  // Slice past the whole patch-function block (variantPatchState/applyPatches/
+  // revertPatches live after resolvePiAiLib, so the "Resolve the installed"
+  // marker is too early); stop before readBody so apply() stays out.
+  const cut = src.indexOf('/** Collect and parse a JSON request body');
+  assert.ok(cut > 0, 'must find the readBody marker');
+  const sandbox = { module: { exports: {} }, require, console };
+  const factory = new Function('module', 'require', 'console',
+    src.slice(src.indexOf('const CLAUDE_CLI_VERSION'), cut) +
+    '\nmodule.exports = { applyPatches, revertPatches, variantPatchState };');
+  factory(sandbox.module, require, console);
+  const { applyPatches, revertPatches, variantPatchState } = sandbox.module.exports;
+  assert.equal(typeof applyPatches, 'function', 'applyPatches must be defined');
+  assert.equal(typeof revertPatches, 'function', 'revertPatches must be defined');
+  assert.equal(typeof variantPatchState, 'function', 'variantPatchState must be defined');
+  // Both must delegate the UA half first and tolerate a missing vision-toolkit.
+  assert.ok(applyPatches.toString().includes('applyUserAgentPatch'), 'applyPatches must run the UA patch first');
+  assert.ok(revertPatches.toString().includes('revertUserAgentPatch'), 'revertPatches must revert the UA patch first');
+  assert.ok(applyPatches.toString().includes('skipped'), 'applyPatches must skip the variant when vision-toolkit is absent');
+  assert.ok(revertPatches.toString().includes('skipped'), 'revertPatches must skip the variant when vision-toolkit is absent');
+});
+
+test('dynamic host lists variantPatch as unsupported (manual scripts)', () => {
+  const src = read('host.body.js');
+  assert.ok(src.includes('variantPatch: { supported: false'), 'dynamic list must report variant patch unsupported');
+  assert.ok(src.includes('apply-variant-retry-patch.mjs'), 'dynamic mode must point at the variant manual script');
+});
+
+test('variant manual CLI ships and delegates to patch-lib', () => {
+  const cli = read(join('patches', 'apply-variant-retry-patch.mjs'));
+  assert.ok(cli.includes('applyVariantRetryPatch'), 'CLI must import the variant apply');
+  assert.ok(cli.includes('revertVariantRetryPatch'), 'CLI must import the variant revert');
+  assert.ok(cli.includes('--target'), 'CLI must accept --target');
+  assert.ok(cli.includes('@anionex/dsh-vision-toolkit'), 'CLI must resolve the vision-toolkit file');
+});
+
