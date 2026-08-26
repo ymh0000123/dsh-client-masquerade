@@ -124,4 +124,90 @@ function revertPatch(target) {
   );
 }
 
-module.exports = { OLD, NEW, NEW_LEGACY, MARKER, applyPatch, revertPatch };
+// ---------------------------------------------------------------------------
+// dsh-vision-toolkit image-input variant retry-policy forwarding.
+//
+// @anionex/dsh-vision-toolkit registers a `vision-toolkit-<upstream>` wrapper
+// route for every text-only upstream provider (the agent's default model here
+// is `vision-toolkit-anyrouter`, NOT `anyrouter`). The wrapper delegates streams
+// to the upstream route and its own comment says "the upstream route owns
+// retry" — but ImageInputVariantAdapter never implements `providerRetryPolicy`,
+// so the variant registration falls back to the DEFAULT policy (5 retries,
+// 500ms→10s) no matter what retryPolicy the upstream profile carries. That is
+// exactly why a queue-adaptive policy written to `anyrouter` never reached the
+// user's agent turns.
+//
+// The patch adds the forwarding method so the variant route inherits the
+// upstream route's resolved policy (queue-adaptive included):
+//
+//   providerRetryPolicy(provider) {
+//     return this.llm.providerRetryPolicy(this.upstream);
+//   }
+// ---------------------------------------------------------------------------
+
+/** Marker line the patched variant file contains (single line, present verbatim); also used to detect patch state. */
+const VARIANT_MARKER = '        return this.llm.providerRetryPolicy(this.upstream);';
+
+/** The stock anchor: the variant adapter's providerInfo method (stable across versions). */
+const VARIANT_ANCHOR = [
+  '    providerInfo(provider) {',
+  '        return {',
+  '            id: provider,',
+  '            name: this.hidden() ? this.upstreamName : `${this.upstreamName}${VARIANT_SUFFIX}`,',
+  '        };',
+  '    }'
+].join('\n');
+
+/** The patched block: forwarding method inserted before providerInfo. */
+const VARIANT_PATCHED = [
+  '    providerRetryPolicy(provider) {',
+  '        return this.llm.providerRetryPolicy(this.upstream);',
+  '    }',
+  '    providerInfo(provider) {',
+  '        return {',
+  '            id: provider,',
+  '            name: this.hidden() ? this.upstreamName : `${this.upstreamName}${VARIANT_SUFFIX}`,',
+  '        };',
+  '    }'
+].join('\n');
+
+/**
+ * Apply the variant retry-policy forwarding patch to one
+ * dsh-vision-toolkit image-input-variants.js file. Idempotent.
+ * @param {string} target - absolute path of the installed image-input-variants.js.
+ * @returns {{ applied: boolean, alreadyPatched: boolean }}
+ * @throws {Error} when the providerInfo anchor is not found (version drift).
+ */
+function applyVariantRetryPatch(target) {
+  const src = readFileSync(target, 'utf8');
+  if (src.includes(VARIANT_MARKER)) return { applied: false, alreadyPatched: true };
+  if (!src.includes(VARIANT_ANCHOR)) {
+    throw new Error(
+      'ImageInputVariantAdapter providerInfo block not found in ' + target +
+      '; the installed dsh-vision-toolkit may differ from the version this patch targets'
+    );
+  }
+  writeFileSync(target, src.replace(VARIANT_ANCHOR, VARIANT_PATCHED), 'utf8');
+  return { applied: true, alreadyPatched: false };
+}
+
+/**
+ * Revert the variant retry-policy forwarding patch. Idempotent.
+ * @param {string} target - absolute path of the installed image-input-variants.js.
+ * @returns {{ reverted: boolean, alreadyStock: boolean }}
+ * @throws {Error} when neither the stock nor the patched block is found (version drift).
+ */
+function revertVariantRetryPatch(target) {
+  const src = readFileSync(target, 'utf8');
+  if (!src.includes(VARIANT_MARKER)) return { reverted: false, alreadyStock: true };
+  if (!src.includes(VARIANT_PATCHED)) {
+    throw new Error(
+      'the patched variant providerRetryPolicy block was not found in ' + target +
+      '; the installed dsh-vision-toolkit may differ from the version this patch targets'
+    );
+  }
+  writeFileSync(target, src.replace(VARIANT_PATCHED, VARIANT_ANCHOR), 'utf8');
+  return { reverted: true, alreadyStock: false };
+}
+
+module.exports = { OLD, NEW, NEW_LEGACY, MARKER, applyPatch, revertPatch, VARIANT_MARKER, VARIANT_ANCHOR, VARIANT_PATCHED, applyVariantRetryPatch, revertVariantRetryPatch };

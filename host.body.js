@@ -347,14 +347,27 @@ return {
      * Turn the queue-adaptation policy for a provider on or off. The policy
      * lives in the provider profile (`retryPolicy`) and is executed by the
      * already-enabled dsh-llm-retry plugin on every failed agent step.
+     *
+     * A `vision-toolkit-<upstream>` wrapper route (the image-input variant the
+     * agent may actually use) is mapped to its upstream provider: the wrapper
+     * inherits the upstream's resolved policy via the dsh-vision-toolkit
+     * retry-forwarding patch.
      */
     const setQueuePolicy = async (providerId, enabled, override) => {
       const map = providersMap();
-      requireProvider(map, providerId);
+      const VARIANT_PREFIX = 'vision-toolkit-';
+      let upstream = providerId;
+      if (providerId.indexOf(VARIANT_PREFIX) === 0) {
+        upstream = providerId.slice(VARIANT_PREFIX.length);
+        if (upstream.length === 0 || !Object.prototype.hasOwnProperty.call(map, upstream)) {
+          throw new Error('provider "' + providerId + '" is a vision-toolkit wrapper whose upstream "' + upstream + '" is not a configured llm-pi-ai route');
+        }
+      }
+      requireProvider(map, upstream);
       if (!settings.writable) throw new Error('settings are not writable in this deployment');
       if (!enabled) {
-        await settings.mutate(NS, [hostify({ op: 'unset', path: ['providers', providerId, 'retryPolicy'] })]);
-        return { provider: providerId, queue: false, retryPolicy: null };
+        await settings.mutate(NS, [hostify({ op: 'unset', path: ['providers', upstream, 'retryPolicy'] })]);
+        return { provider: providerId, ...(upstream === providerId ? {} : { upstream: upstream }), queue: false, retryPolicy: null };
       }
       const o = override === undefined || override === null ? {} : override;
       const retries = typeof o.retries === 'number' && Number.isFinite(o.retries) && o.retries >= 0 ? o.retries : QUEUE_RETRY_POLICY.maxRetries;
@@ -369,8 +382,8 @@ return {
           jitterRatio: QUEUE_RETRY_POLICY.backoff.jitterRatio
         }
       };
-      await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', providerId, 'retryPolicy'], value: policy })]);
-      return { provider: providerId, queue: true, retryPolicy: policy };
+      await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', upstream, 'retryPolicy'], value: policy })]);
+      return { provider: providerId, ...(upstream === providerId ? {} : { upstream: upstream }), queue: true, retryPolicy: policy };
     };
 
     /** One real streaming call through the route; never throws, always reports. */
@@ -465,7 +478,35 @@ return {
     const run = async (args, signal) => {
       const action = args && args.action ? String(args.action) : 'list';
       if (action === 'list') {
-        return { ok: true, providers: listProviders(), uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' } };
+        const llm = ctx.get('llm');
+        let registeredRoutes = [];
+        if (llm !== undefined) {
+          try {
+            const infos = llm.listProviders ? llm.listProviders() : [];
+            registeredRoutes = infos.map((info) => {
+              const id = info && info.id ? String(info.id) : '';
+              let policy = null;
+              try {
+                const reg = llm.providerRetryPolicy(id);
+                if (reg !== undefined && reg !== null) {
+                  policy = {
+                    mode: typeof reg.mode === 'string' ? reg.mode : null,
+                    maxRetries: typeof reg.maxRetries === 'number' ? reg.maxRetries : null,
+                    initialDelayMs: typeof reg.initialDelayMs === 'number' ? reg.initialDelayMs : null,
+                    maxDelayMs: typeof reg.maxDelayMs === 'number' ? reg.maxDelayMs : null,
+                    retryableCodes: Array.isArray(reg.retryableCodes) ? reg.retryableCodes.map(String) : []
+                  };
+                }
+              } catch (e) {
+                policy = { error: String(e && e.message ? e.message : e) };
+              }
+              return { id: id, name: info.name !== undefined ? String(info.name) : id, retryPolicy: policy };
+            });
+          } catch (e) {
+            registeredRoutes = [{ error: String(e && e.message ? e.message : e) }];
+          }
+        }
+        return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' } };
       }
       if (action === 'patch') {
         return { ok: false, error: 'dynamic mode cannot apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' };

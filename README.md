@@ -139,6 +139,26 @@ mask_client action=queue provider=anyrouter state=off           # 关闭，回�
 >
 > 注意：策略写入的是设置文档，pi-ai 适配器每次请求都会重新读取 profile，因此**无需重启**即可对下一次 agent 请求生效（插件本体升级仍需重启 `dsh web`）。
 
+### ⚠️ 重要：agent 实际用的路由可能是 vision-toolkit 变体
+
+排查"还是只重试 5 次"时发现一个隐蔽坑：**你的 agent 默认模型**（`settings.yaml` 的 `agent-default-model`）可能指向 **`vision-toolkit-anyrouter`** 而不是 `anyrouter`。`@anionex/dsh-vision-toolkit` 会给每个纯文本上游路由注册一个 `vision-toolkit-<上游>` **包装变体**（为了支持粘贴图片），你的消息走的是这个包装路由。
+
+而 vision-toolkit 的包装适配器**没有实现 `providerRetryPolicy`**（它自己的注释说"上游路由拥有重试"，但漏了转发），所以 `vision-toolkit-anyrouter` 的注册策略永远是**默认 5 次**——无论上游 `anyrouter` 配了什么排队策略，都到不了它头上。
+
+本插件 1.5.0 解决了这个问题：
+
+1. **转发补丁**（`patches/`）：给已安装的 `dsh-vision-toolkit/lib/image-input-variants.js` 加上 `providerRetryPolicy()` 转发方法，让包装路由**继承上游的排队策略**。安装后运行：
+   ```bash
+   node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs  # 不变
+   # 变体转发补丁在插件启动时自检；也可以手动执行：
+   node -e "require('dsh-client-masquerade/patches/patch-lib.js').applyVariantRetryPatch(require('path').join(require.resolve('@anionex/dsh-vision-toolkit/package.json'), '..', 'lib', 'image-input-variants.js'))"
+   ```
+   然后重启 `dsh web`。
+2. **`queue` 动作支持变体路由**：`mask_client action=queue provider=vision-toolkit-anyrouter state=on` 会自动映射到上游 `anyrouter` 写策略（返回里带 `upstream` 字段）。
+3. **`list` 输出 `registeredRoutes`**：列出**所有**已注册路由（含 `vision-toolkit-*` 变体）及其 `registrationRetryPolicy`——一眼就能确认 `vision-toolkit-anyrouter` 是否已继承排队策略（应显示 maxRetries=10 / maxDelayMs=30000）。
+
+> 诊断时用 `mask_client action=list` 看 `registeredRoutes` 里 `vision-toolkit-anyrouter` 的策略；若仍是 maxRetries=5，说明转发补丁还没生效（重启后生效）。
+
 ## 使用 / Usage
 
 **设置页**：选择 provider → 点 **Claude Code / Codex / Off**，或 **Test call** 验证伪装是否生效；**排队适配**开关控制该 provider 的排队重试策略。

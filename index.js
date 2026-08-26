@@ -19,7 +19,7 @@ const API_PATH = '/dsh-client-masquerade/api';
 
 const { readFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
-const { applyPatch, revertPatch, MARKER: PATCH_MARKER } = require('./patches/patch-lib.js');
+const { applyPatch, revertPatch, MARKER: PATCH_MARKER, VARIANT_MARKER } = require('./patches/patch-lib.js');
 
 /*
  * The claude-code preset mirrors a REAL Claude Code request, captured off the
@@ -300,6 +300,42 @@ function checkUserAgentPatch() {
   }
 }
 
+/**
+ * Resolve the installed @anionex/dsh-vision-toolkit image-input-variants.js.
+ * Returns undefined when the package is not installed.
+ */
+function resolveVisionToolkitVariants() {
+  try {
+    const pkgJson = require.resolve('@anionex/dsh-vision-toolkit/package.json');
+    return join(dirname(pkgJson), 'lib', 'image-input-variants.js');
+  } catch (e) {
+    return undefined;
+  }
+}
+
+/**
+ * Warn loudly when the dsh-vision-toolkit variant retry-forwarding patch is
+ * missing. Without it, `vision-toolkit-<upstream>` wrapper routes (which the
+ * agent may actually use, e.g. vision-toolkit-anyrouter) always fall back to
+ * the default 5-retry policy no matter what queue policy the upstream profile
+ * carries — the exact "still only retries five times" symptom.
+ */
+function checkVariantRetryPatch() {
+  const target = resolveVisionToolkitVariants();
+  if (target === undefined) return; // vision-toolkit not installed; nothing to patch
+  try {
+    const src = readFileSync(target, 'utf8');
+    if (!src.includes(VARIANT_MARKER)) {
+      console.warn(
+        '[client-masquerade] dsh-vision-toolkit image-input variants are NOT retry-forwarding patched: vision-toolkit-<upstream> wrapper routes (e.g. vision-toolkit-anyrouter) fall back to the default 5-retry policy even when the upstream profile carries a queue retryPolicy. ' +
+        'Apply the variant retry patch (patches/patch-lib.js applyVariantRetryPatch on <vision-toolkit>/lib/image-input-variants.js) and restart dsh web.'
+      );
+    }
+  } catch (e) {
+    console.warn('[client-masquerade] could not verify dsh-vision-toolkit variant patch state: ' + String(e && e.message ? e.message : e));
+  }
+}
+
 /** Collect and parse a JSON request body (node http IncomingMessage). */
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -336,6 +372,7 @@ function isLocalHost(host) {
 
 async function apply(ctx) {
   checkUserAgentPatch();
+  checkVariantRetryPatch();
   const settings = ctx.get('settings');
   if (settings === undefined) {
     console.error(NAME + ': settings service unavailable');
@@ -473,19 +510,36 @@ async function apply(ctx) {
    * anyrouter-style relays queue (429/503 "Service Unavailable"), the agent
    * keeps retrying with exponential backoff instead of failing after ~30s.
    *
-   * @param {string} providerId - pi-ai provider route id.
+   * A `vision-toolkit-<upstream>` wrapper route (the image-input variant the
+   * agent may actually use, e.g. vision-toolkit-anyrouter) is mapped to its
+   * upstream provider: the wrapper inherits the upstream's resolved policy via
+   * the dsh-vision-toolkit retry-forwarding patch, so writing the policy to the
+   * upstream is what makes the variant queue-adapted too.
+   *
+   * @param {string} providerId - pi-ai provider route id (or a variant wrapper).
    * @param {boolean} enabled - true writes the policy, false removes it.
    * @param {{retries?: number, maxdelay?: number}} [override] - optional policy
    *   overrides for maxRetries and backoff.maxDelayMs (ms).
-   * @returns {{ provider: string, queue: boolean, retryPolicy: object|null }}
+   * @returns {{ provider: string, upstream?: string, queue: boolean, retryPolicy: object|null }}
    */
   const setQueuePolicy = async (providerId, enabled, override) => {
     const map = providersMap();
-    requireProvider(map, providerId);
+    // vision-toolkit-<upstream> wrapper routes are not llm-pi-ai providers;
+    // their retry policy inherits from the upstream route via the
+    // dsh-vision-toolkit forwarding patch, so write to the upstream profile.
+    const VARIANT_PREFIX = 'vision-toolkit-';
+    let upstream = providerId;
+    if (providerId.indexOf(VARIANT_PREFIX) === 0) {
+      upstream = providerId.slice(VARIANT_PREFIX.length);
+      if (upstream.length === 0 || !Object.prototype.hasOwnProperty.call(map, upstream)) {
+        throw new Error('provider "' + providerId + '" is a vision-toolkit wrapper whose upstream "' + upstream + '" is not a configured llm-pi-ai route');
+      }
+    }
+    requireProvider(map, upstream);
     if (!settings.writable) throw new Error('settings are not writable in this deployment');
     if (!enabled) {
-      await settings.mutate(NS, [{ op: 'unset', path: ['providers', providerId, 'retryPolicy'] }]);
-      return { provider: providerId, queue: false, retryPolicy: null };
+      await settings.mutate(NS, [{ op: 'unset', path: ['providers', upstream, 'retryPolicy'] }]);
+      return { provider: providerId, ...(upstream === providerId ? {} : { upstream: upstream }), queue: false, retryPolicy: null };
     }
     const o = override === undefined || override === null ? {} : override;
     const retries = typeof o.retries === 'number' && Number.isFinite(o.retries) && o.retries >= 0 ? o.retries : QUEUE_RETRY_POLICY.maxRetries;
@@ -500,8 +554,8 @@ async function apply(ctx) {
         jitterRatio: QUEUE_RETRY_POLICY.backoff.jitterRatio
       }
     };
-    await settings.mutate(NS, [{ op: 'set', path: ['providers', providerId, 'retryPolicy'], value: policy }]);
-    return { provider: providerId, queue: true, retryPolicy: policy };
+    await settings.mutate(NS, [{ op: 'set', path: ['providers', upstream, 'retryPolicy'], value: policy }]);
+    return { provider: providerId, ...(upstream === providerId ? {} : { upstream: upstream }), queue: true, retryPolicy: policy };
   };
 
   /** One real streaming call through the route; never throws, always reports. */
@@ -604,7 +658,38 @@ async function apply(ctx) {
   const run = async (args, signal) => {
     const action = args && args.action ? String(args.action) : 'list';
     if (action === 'list') {
-      return { ok: true, providers: listProviders(), uaPatch: uaPatchState() };
+      const llm = ctx.get('llm');
+      let registeredRoutes = [];
+      if (llm !== undefined) {
+        try {
+          // Every route with a registered adapter — including wrapper routes the
+          // user's agent actually uses (e.g. vision-toolkit-anyrouter), which
+          // are not llm-pi-ai providers and would otherwise be invisible here.
+          const infos = llm.listProviders ? llm.listProviders() : [];
+          registeredRoutes = infos.map((info) => {
+            const id = info && info.id ? String(info.id) : '';
+            let policy = null;
+            try {
+              const reg = llm.providerRetryPolicy(id);
+              if (reg !== undefined && reg !== null) {
+                policy = {
+                  mode: typeof reg.mode === 'string' ? reg.mode : null,
+                  maxRetries: typeof reg.maxRetries === 'number' ? reg.maxRetries : null,
+                  initialDelayMs: typeof reg.initialDelayMs === 'number' ? reg.initialDelayMs : null,
+                  maxDelayMs: typeof reg.maxDelayMs === 'number' ? reg.maxDelayMs : null,
+                  retryableCodes: Array.isArray(reg.retryableCodes) ? reg.retryableCodes.map(String) : []
+                };
+              }
+            } catch (e) {
+              policy = { error: String(e && e.message ? e.message : e) };
+            }
+            return { id: id, name: info.name !== undefined ? String(info.name) : id, retryPolicy: policy };
+          });
+        } catch (e) {
+          registeredRoutes = [{ error: String(e && e.message ? e.message : e) }];
+        }
+      }
+      return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: uaPatchState() };
     }
     if (action === 'patch') {
       return applyUserAgentPatch();

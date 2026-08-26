@@ -189,8 +189,12 @@ test('queue action wiring exists in both host halves', () => {
     const src = read(file);
     assert.ok(src.includes("action === 'queue'"), `${file}: run() must handle action=queue`);
     assert.ok(src.includes("setQueuePolicy"), `${file}: must define setQueuePolicy`);
-    assert.ok(src.includes("['providers', providerId, 'retryPolicy']"), `${file}: must write providers.<id>.retryPolicy`);
+    assert.ok(src.includes("'retryPolicy'"), `${file}: must write providers.<id>.retryPolicy`);
     assert.ok(src.includes('retryableCodes'), `${file}: the policy must carry retryableCodes`);
+    // vision-toolkit-<upstream> wrapper routes must map to their upstream
+    // profile (the wrapper inherits the upstream's policy via the forwarding patch).
+    assert.ok(src.includes("'vision-toolkit-'"), `${file}: must recognize the vision-toolkit variant prefix`);
+    assert.ok(src.includes('upstream'), `${file}: must map variant routes to their upstream`);
   }
 });
 
@@ -279,3 +283,46 @@ test('patch blocks are textually distinct (legacy vs current)', () => {
   assert.ok(NEW.includes('const entries = Object.entries'), 'current shape uses the shared entries variable');
   assert.ok(NEW_LEGACY.includes('Object.entries(headers ?? {}).filter'), 'legacy shape uses inline Object.entries');
 });
+
+// dsh-vision-toolkit image-input variant routes (vision-toolkit-<upstream>) are
+// what the user's agent actually uses (agent-default-model points at one), but
+// their adapter never implemented providerRetryPolicy, so they fell back to the
+// default 5-retry policy regardless of the upstream profile. The forwarding
+// patch makes the wrapper inherit the upstream's resolved policy.
+const {
+  VARIANT_MARKER, VARIANT_ANCHOR, VARIANT_PATCHED,
+  applyVariantRetryPatch, revertVariantRetryPatch
+} = require('../patches/patch-lib.js');
+
+test('variant retry patch inserts the forwarding method before providerInfo', () => {
+  withTempLib('class X extends LlmAdapter {\n' + VARIANT_ANCHOR + '\n}\n', (file) => {
+    const applied = applyVariantRetryPatch(file);
+    assert.equal(applied.applied, true);
+    const src = readFileSync(file, 'utf8');
+    assert.ok(src.includes(VARIANT_MARKER), 'forwarding line must be present');
+    assert.ok(src.includes('providerRetryPolicy(provider) {'), 'method must be present');
+    assert.ok(src.indexOf('providerRetryPolicy') < src.indexOf('providerInfo'),
+      'forwarding method must precede providerInfo');
+    // Idempotent.
+    assert.deepEqual(applyVariantRetryPatch(file), { applied: false, alreadyPatched: true });
+    // Revert restores stock.
+    assert.deepEqual(revertVariantRetryPatch(file), { reverted: true, alreadyStock: false });
+    assert.ok(!readFileSync(file, 'utf8').includes(VARIANT_MARKER));
+    assert.deepEqual(revertVariantRetryPatch(file), { reverted: false, alreadyStock: true });
+  });
+});
+
+test('variant patch rejects a drifted file without the providerInfo anchor', () => {
+  withTempLib('class X {}\n', (file) => {
+    assert.throws(() => applyVariantRetryPatch(file), /providerInfo block not found/);
+  });
+});
+
+test('list reports registeredRoutes (all llm routes incl. vision-toolkit variants)', () => {
+  for (const file of ['index.js', 'host.body.js']) {
+    const src = read(file);
+    assert.ok(src.includes('registeredRoutes'), `${file}: list must include registeredRoutes`);
+    assert.ok(src.includes('llm.listProviders'), `${file}: must enumerate all registered routes`);
+  }
+});
+
