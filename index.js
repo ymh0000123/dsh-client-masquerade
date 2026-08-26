@@ -100,20 +100,22 @@ const TEST_QUEUE_ATTEMPTS = 10;
  * keeps the request in the queue instead of failing after ~30s (the default
  * policy is 5 retries at 500ms→10s).
  *
- * Values: 10 retries with exponential backoff 1s→30s (with jitter), covering
+ * Values: 15 retries with exponential backoff 1s→45s (with jitter), covering
  * the failure codes pi-ai maps a relay rejection to (RATE_LIMIT for 429,
  * SERVER for 5xx, plus transport/timeout/empty-response). Cumulative wait is
- * roughly 2-3 minutes — long enough to ride out a typical relay queue, short
- * enough that a genuinely dead route fails loudly instead of hanging forever.
+ * roughly 7-8 minutes — longer than a real Claude Code CLI's own retry window
+ * (measured ~10 attempts over ~3:45 against the same relay), so DSH outwaits
+ * any queue a stock client can ride out, while still failing loudly on a
+ * genuinely dead route.
  */
 const QUEUE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'];
 const QUEUE_RETRY_POLICY = {
   mode: 'normal',
-  maxRetries: 10,
+  maxRetries: 15,
   retryableCodes: QUEUE_RETRYABLE_CODES,
   backoff: {
     initialDelayMs: 1000,
-    maxDelayMs: 30000,
+    maxDelayMs: 45000,
     jitterRatio: 0.3
   }
 };

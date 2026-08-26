@@ -79,15 +79,20 @@ const TEST_QUEUE_ATTEMPTS = 10;
  * policy on the agent loop's failed-step extension point, so an agent turn
  * keeps the request in the queue instead of failing after ~30s (the default
  * policy is 5 retries at 500ms→10s).
+ *
+ * Values: 15 retries with exponential backoff 1s→45s, cumulative wait ~7-8
+ * minutes — longer than a real Claude Code CLI's own window against the same
+ * relay (measured ~10 attempts / ~3:45), so DSH outwaits any queue a stock
+ * client can ride out.
  */
 const QUEUE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'];
 const QUEUE_RETRY_POLICY = {
   mode: 'normal',
-  maxRetries: 10,
+  maxRetries: 15,
   retryableCodes: QUEUE_RETRYABLE_CODES,
   backoff: {
     initialDelayMs: 1000,
-    maxDelayMs: 30000,
+    maxDelayMs: 45000,
     jitterRatio: 0.3
   }
 };
