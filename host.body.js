@@ -61,6 +61,28 @@ for (const id of Object.keys(PRESETS)) {
 const RESERVED_HEADERS = ['user-agent']; // attribution default; an explicit profile user-agent is now honored on the wire
 
 /**
+ * Request-body masquerade switch, mirrored from patches/patch-lib.js (a pasted
+ * dynamic plugin body cannot require the package).
+ *
+ * anyrouter-family relays gate /v1/messages on the request BODY, not its
+ * headers: a JSON `metadata.user_id` (device_id non-empty, session_id
+ * UUID-shaped), a client-identity `system` block, and verbatim Glob/Grep/Read
+ * tool definitions. A body without them draws a bare 429/503 — the same answer
+ * a busy channel pool gives, which is what makes this failure so easy to
+ * misread. The injection lives in a patch to @earendil-works/pi-ai; this half
+ * only writes the switch the patch reads, and strips it from the wire.
+ */
+const BODY_SWITCH_HEADER = 'x-dsh-body-masquerade';
+/** The tools the patch injects. Read-only by choice: a stray call fails the step, nothing more. */
+const SENTINEL_TOOL_NAMES = ['Glob', 'Grep', 'Read'];
+/** A device id the relay sees as one stable device for this provider. */
+const randomDeviceId = () => {
+  let hex = '';
+  while (hex.length < 32) hex += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+  return hex.slice(0, 32);
+};
+
+/**
  * Gateway statuses worth another attempt. Relays of the new-api family answer
  * 503/500 with `get_channel_failed` — and, confusingly, 429 with the SAME body
  * "Service Unavailable" — while their upstream pool has no free channel.
@@ -124,12 +146,21 @@ function isQueueAdapted(profile) {
 
 /**
  * Turn one gateway rejection into something actionable, and say whether the
- * disguise is even implicated: a relay with no free upstream Claude channel
- * rejects a REAL Claude Code CLI exactly as it rejects us, so reporting that
- * as a masquerade failure sends the user tuning headers that were never wrong.
+ * disguise is even implicated.
+ *
+ * The hard case is the new-api family (anyrouter and friends), which answers
+ * 429/503 with a bare "Service Unavailable" for TWO unrelated reasons: its
+ * upstream channel pool is busy, or its Claude Code check rejected the request
+ * body. The status line cannot tell them apart, and reading every one of them
+ * as a queue is what made an earlier version advise "just wait" for a route
+ * that would never come back — so the answer follows the route state instead.
+ *
+ * @param {string} callError - the error text captured from the stream.
+ * @param {{ bodyMasquerade?: boolean, bodyPatched?: boolean|null }} [context] - route state.
  */
-function classifyCallError(callError) {
+function classifyCallError(callError, context) {
   const text = String(callError || '');
+  const ctxt = context === undefined || context === null ? {} : context;
   if (/\b(401|403)\b/.test(text) || /UNAUTHENTICATED/i.test(text)) {
     return {
       category: 'auth',
@@ -150,22 +181,35 @@ function classifyCallError(callError) {
     return {
       category: 'shape-validation',
       disguiseImplicated: true,
-      hint: 'gateway validated the Claude Code request body shape and rejected it; header-only masquerade cannot satisfy this route (body-level mimicry is out of scope)',
-      hintZh: '网关校验了 Claude Code 请求体结构并拒绝；仅靠请求头伪装不够，需要请求体级别的模拟（超出本插件范围）'
+      hint: 'gateway validated the Claude Code request body shape and rejected it; enable body masquerade for this provider (mask_client action=body state=on provider=…), then apply the pi-ai body patch manually and restart dsh web',
+      hintZh: '网关校验了 Claude Code 请求体结构并拒绝；为该 provider 开启请求体伪装（mask_client action=body state=on provider=…），然后手动应用 pi-ai 请求体补丁并重启 dsh web'
     };
   }
-  // anyrouter-style relays queue while their channel pool is empty: they answer
-  // 429 or 503 with a bare "Service Unavailable" (or the new-api
-  // "get_channel_failed" / "负载已经达到上限" text), and a client that keeps
-  // retrying with backoff eventually gets through. That is a queue, not a
-  // disguise problem.
-  const queued = /get_channel_failed|无可用渠道|负载已经达到上限|当前分组.*(负载|无可用)|no available channel/i.test(text);
-  if (queued || RETRYABLE_STATUS.test(text)) {
+  const relayBusyText = /get_channel_failed|无可用渠道|负载已经达到上限|当前分组.*(负载|无可用)|no available channel/i.test(text);
+  if (relayBusyText || RETRYABLE_STATUS.test(text)) {
+    // A bare 429/503 here means either "no free channel" or "your body did not
+    // look like Claude Code". Answer from state this function CAN see.
+    if (ctxt.bodyMasquerade === true && ctxt.bodyPatched === false) {
+      return {
+        category: 'body-fingerprint',
+        disguiseImplicated: true,
+        hint: 'this route asks for body masquerade but the pi-ai body patch is NOT applied, so the request body still looks like DSH — anyrouter-family relays answer exactly this 429/503 to a body that fails their Claude Code check. Apply patches/apply-pi-ai-body-patch.mjs and restart dsh web',
+        hintZh: '该路线已开启请求体伪装，但 pi-ai 请求体补丁未生效，请求体仍是 DSH 的形状——anyrouter 系网关对通不过 Claude Code 校验的请求体正是回这个 429/503。请执行 patches/apply-pi-ai-body-patch.mjs 并重启 dsh web'
+      };
+    }
+    if (ctxt.bodyMasquerade !== true) {
+      return {
+        category: 'body-fingerprint',
+        disguiseImplicated: true,
+        hint: 'a bare 429/503 from a new-api-family relay is ambiguous: either its channel pool is busy, or its Claude Code check rejected the request body. Header spoofing alone does not satisfy that check — these relays gate on metadata.user_id, a client-identity system block and verbatim tool definitions. Enable body masquerade (mask_client action=body state=on provider=…), apply the body patch, restart dsh web; if it still fails, the pool really is busy and the queue policy is what helps',
+        hintZh: '这类 new-api 系网关的裸 429/503 有两种含义：渠道池真的忙，或者它的 Claude Code 校验拒绝了请求体。仅靠请求头伪装满足不了该校验——它们校验 metadata.user_id、客户端身份 system 块与逐字的工具定义。请开启请求体伪装（mask_client action=body state=on provider=…），应用请求体补丁并重启 dsh web；若之后仍失败，才是渠道池真忙，此时排队策略才有用'
+      };
+    }
     return {
       category: 'queued',
       disguiseImplicated: false,
-      hint: 'the gateway is queuing — its upstream Claude channels are all busy right now and it answers a real Claude Code CLI the same way. Retrying with backoff eventually gets through; enable the provider queue policy (mask_client action=queue state=on provider=…) so agent turns outwait the queue instead of failing after the default ~30s',
-      hintZh: '网关正在排队——其上游 Claude 渠道当前全部繁忙（对真实 Claude Code CLI 也是同样结果）。带退避重试最终能通过；请为该 provider 开启排队适配（mask_client action=queue state=on provider=…），让 agent 请求能等到渠道空闲，而不是在默认约 30 秒后就失败'
+      hint: 'body masquerade is live on this route, so the remaining reading of 429/503 is a busy upstream pool — the same answer a real Claude Code CLI gets. Retrying with backoff eventually gets through; enable the provider queue policy (mask_client action=queue state=on provider=…) so agent turns outwait the queue instead of failing after the default ~30s',
+      hintZh: '该路线的请求体伪装已生效，因此 429/503 更可能是上游渠道池真的繁忙（真实 Claude Code CLI 也会收到同样结果）。带退避重试最终能通过；为该 provider 开启排队适配（mask_client action=queue state=on provider=…），让 agent 请求能等到渠道空闲，而不是在默认约 30 秒后就失败'
     };
   }
   return { category: 'other', disguiseImplicated: false, hint: '', hintZh: '' };
@@ -242,6 +286,15 @@ return {
       return h && typeof h === 'object' ? h : {};
     };
 
+    /** Does this profile carry the body-masquerade switch header? */
+    const bodyMasqueradeOf = (profile) => {
+      const headers = headersOf(profile);
+      return Object.keys(headers).some((name) => {
+        if (name.toLowerCase() !== BODY_SWITCH_HEADER) return false;
+        return String(headers[name]).startsWith('claude-code');
+      });
+    };
+
     const listProviders = () => {
       const map = providersMap();
       const llm = ctx.get('llm');
@@ -275,6 +328,9 @@ return {
           displayName: profile && typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
           active: detected.active,
           stale: detected.stale,
+          // Whether this route asks for request-body masquerade. Dynamic mode
+          // cannot verify the patch that performs it, so this reports intent.
+          bodyMasquerade: bodyMasqueradeOf(profile),
           // anyrouter-style relays queue while channels are busy; the queue
           // policy tells dsh-llm-retry to keep retrying (see QUEUE_RETRY_POLICY).
           queue: isQueueAdapted(profile),
@@ -337,6 +393,9 @@ return {
       const current = headersOf(map[providerId]);
       const filtered = {};
       for (const name of Object.keys(current)) {
+        // `off` means "not masquerading", so the body-masquerade switch goes
+        // with the spoofed headers. Switching PRESETS keeps it.
+        if (name.toLowerCase() === BODY_SWITCH_HEADER) continue;
         if (SPOOF_KEYS.some((key) => key.toLowerCase() === name.toLowerCase()) === false) filtered[name] = current[name];
       }
       if (!settings.writable) throw new Error('settings are not writable in this deployment');
@@ -346,6 +405,63 @@ return {
       }
       await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', providerId, 'headers'], value: filtered })]);
       return { provider: providerId, preset: null, headers: filtered };
+    };
+
+    /**
+     * Turn request-body masquerade for a provider on or off.
+     *
+     * anyrouter-family relays gate /v1/messages on the request BODY: it needs a
+     * JSON `metadata.user_id` (device_id non-empty, session_id UUID-shaped), a
+     * client-identity `system` block, and verbatim Glob/Grep/Read tool
+     * definitions. Anything else gets a bare 429/503 that looks exactly like a
+     * busy channel pool.
+     *
+     * This half only writes the switch header; the injection itself lives in a
+     * patch to @earendil-works/pi-ai, which dynamic mode cannot apply (no
+     * filesystem writes). Run patches/apply-pi-ai-body-patch.mjs by hand and
+     * restart, exactly as with the user-agent patch.
+     *
+     * Cost: the sentinel tools are advertised to the model but not implemented
+     * by DSH. They are read-only by choice, so a stray call fails that step
+     * rather than executing or editing anything.
+     */
+    const setBodyMasquerade = async (providerId, enabled) => {
+      const map = providersMap();
+      requireProvider(map, providerId);
+      if (!settings.writable) throw new Error('settings are not writable in this deployment');
+      const current = headersOf(map[providerId]);
+      if (!enabled) {
+        const filtered = {};
+        for (const name of Object.keys(current)) {
+          if (name.toLowerCase() !== BODY_SWITCH_HEADER) filtered[name] = current[name];
+        }
+        if (Object.keys(filtered).length === 0) {
+          await settings.mutate(NS, [hostify({ op: 'unset', path: ['providers', providerId, 'headers'] })]);
+        } else {
+          await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', providerId, 'headers'], value: filtered })]);
+        }
+        return { provider: providerId, bodyMasquerade: false, deviceId: null, sentinelTools: SENTINEL_TOOL_NAMES.slice(), patched: null, restartRequired: false };
+      }
+      // Reuse the device id already on file, so off-then-on does not present
+      // the relay with a brand-new device.
+      const existing = Object.keys(current).find((name) => name.toLowerCase() === BODY_SWITCH_HEADER);
+      const existingId = existing === undefined ? '' : String(current[existing]).split(':').slice(1).join(':');
+      const deviceId = existingId.length > 0 ? existingId : randomDeviceId();
+      const next = {};
+      for (const name of Object.keys(current)) {
+        if (name.toLowerCase() !== BODY_SWITCH_HEADER) next[name] = current[name];
+      }
+      next[BODY_SWITCH_HEADER] = 'claude-code:' + deviceId;
+      await settings.mutate(NS, [hostify({ op: 'set', path: ['providers', providerId, 'headers'], value: next })]);
+      return {
+        provider: providerId,
+        bodyMasquerade: true,
+        deviceId: deviceId,
+        sentinelTools: SENTINEL_TOOL_NAMES.slice(),
+        // Dynamic mode cannot inspect or apply the patch; say so rather than guess.
+        patched: null,
+        restartRequired: true
+      };
     };
 
     /**
@@ -428,10 +544,14 @@ return {
       requireProvider(map, providerId);
       const profile = map[providerId];
       const headers = headersOf(profile);
+      const bodyMasquerade = bodyMasqueradeOf(profile);
       // Mirror the pi-ai adapter's requestHeaders: attribution names are used as
       // defaults, but an explicitly configured profile user-agent wins on the wire.
       const effective = {};
       for (const name of Object.keys(headers)) {
+        // The body-masquerade switch is internal — the patched pi-ai strips it,
+        // so reporting it as a wire header would be a lie.
+        if (name.toLowerCase() === BODY_SWITCH_HEADER) continue;
         if (RESERVED_HEADERS.indexOf(name.toLowerCase()) === -1) effective[name] = String(headers[name]);
       }
       const profileUA = Object.keys(headers).find((name) => name.toLowerCase() === 'user-agent');
@@ -459,12 +579,19 @@ return {
         if (attempts < maxAttempts) await sleep(queueDelay(attempts));
       }
       const callError = result.callError;
-      const classification = callError === null ? null : classifyCallError(callError);
+      // Dynamic mode cannot read the patch state (no filesystem access), so the
+      // classifier is told only what the profile asks for. That still separates
+      // "never enabled body masquerade" from "enabled and still failing".
+      const classification = callError === null ? null : classifyCallError(callError, {
+        bodyMasquerade: bodyMasquerade,
+        bodyPatched: null
+      });
       return {
         ok: callError === null,
         provider: providerId,
         model: chosen,
         activePreset: detectPreset(headers),
+        bodyMasquerade: bodyMasquerade,
         effectiveWireHeaders: effective,
         attempts: attempts,
         firstText: result.firstText,
@@ -577,17 +704,39 @@ return {
           return { ok: false, error: String(e && e.message ? e.message : e) };
         }
       }
+      if (action === 'body') {
+        const providerId = args && args.provider ? String(args.provider) : '';
+        if (!providerId) return { ok: false, error: 'provider is required' };
+        const state = args && args.state ? String(args.state) : 'on';
+        if (state !== 'on' && state !== 'off') return { ok: false, error: 'state must be on or off' };
+        try {
+          const applied = await setBodyMasquerade(providerId, state === 'on');
+          if (state === 'off') {
+            return { ok: true, message: 'provider "' + providerId + '" body masquerade cleared; requests carry DSH\'s own body shape again', applied: applied };
+          }
+          return {
+            ok: true,
+            message: 'provider "' + providerId + '" now masquerades at the body level: JSON metadata.user_id (device ' + applied.deviceId +
+              '), a client-identity system block, and the sentinel tools ' + applied.sentinelTools.join('/') +
+              ' are injected into each request. Those sentinels are advertised to the model but not implemented by DSH; they are read-only, so a stray call fails the step rather than doing anything. ' +
+              'Dynamic mode cannot write the patch that performs the injection — run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-body-patch.mjs from your profile dir, then restart dsh web.',
+            applied: applied
+          };
+        } catch (e) {
+          return { ok: false, error: String(e && e.message ? e.message : e) };
+        }
+      }
       return { ok: false, error: 'unknown action "' + action + '"' };
     };
 
     ctx.effect(() => harness.registerTool(ctx, harness.defineTool({
       name: 'mask_client',
-      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex) by writing spoofed request headers into its profile settings, clear the disguise, or enable queue-adaptation. anyrouter-style relays queue while their upstream channels are busy (429/503 "Service Unavailable") and a client that keeps retrying with backoff eventually gets through; queue on/off writes/removes the provider retryPolicy that dsh-llm-retry executes on failed agent steps. list shows routes, current disguise (stale=true means an older preset that should be re-applied), whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes (the ground truth that settings changes reached the llm registration); test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection — disguiseImplicated=false means the gateway would reject a real Claude Code CLI too; patch applies both patches — the pi-ai user-agent patch and the dsh-vision-toolkit variant retry-forwarding patch (restart required; dynamic mode defers to the manual scripts).',
+      description: 'Make one llm-pi-ai provider route masquerade as a known client (claude-code, codex), clear the disguise, enable request-body masquerade, or enable queue-adaptation. Two levels exist because relays gate at two levels: HEADER spoofing (action=on) satisfies User-Agent fingerprinting, while anyrouter-family relays gate on the request BODY — they require a JSON metadata.user_id (session_id UUID-shaped), a client-identity system block, and verbatim Glob/Grep/Read tool definitions, and answer a bare 429/503 to anything else. That 429/503 is indistinguishable from a busy channel pool, so a route failing this check is easily misread as queueing; action=body state=on writes the switch (its sentinel tools are advertised to the model but unimplemented — read-only, so a stray call fails the step and does nothing), though dynamic mode cannot apply the patch that performs the injection: run patches/apply-pi-ai-body-patch.mjs by hand. list shows routes, current disguise (stale=true means an older preset that should be re-applied), bodyMasquerade per route, whether the queue policy is on, and registrationRetryPolicy — the policy the agent loop ACTUALLY executes; test makes one real streaming call, rides the queue with exponential backoff (up to ~2-3 min, abortable) and classifies the rejection using that route\'s body state; queue on/off writes/removes the provider retryPolicy dsh-llm-retry executes on failed agent steps; patch/unpatch defer to the manual scripts in dynamic mode.',
       parameters: {
-        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'queue', 'patch', 'unpatch'], description: 'list = show routes + both patch states; on = apply a disguise; off = clear it; test = make one real call (rides the queue); queue = enable/disable queue-adaptation (state=on|off); patch = apply both patches (pi-ai user-agent + vision-toolkit variant retry-forwarding; restart required); unpatch = revert both' },
-        provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/queue)' },
+        action: { type: 'string', required: true, enum: ['list', 'on', 'off', 'test', 'body', 'queue', 'patch', 'unpatch'], description: 'list = show routes; on = apply a header disguise; off = clear the disguise (body masquerade included); test = make one real call (rides the queue); body = enable/disable request-body masquerade (state=on|off) for relays that fingerprint the body; queue = enable/disable queue-adaptation (state=on|off); patch/unpatch = defer to the manual patch scripts in dynamic mode' },
+        provider: { type: 'string', description: 'pi-ai provider route id (required for on/off/test/body/queue)' },
         preset: { type: 'string', enum: ['claude-code', 'codex', 'custom'], description: 'disguise profile (required for on)' },
-        state: { type: 'string', enum: ['on', 'off'], description: 'queue policy state (required for action=queue; default on)' },
+        state: { type: 'string', enum: ['on', 'off'], description: 'on/off state (required for action=body and action=queue; default on)' },
         retries: { type: 'string', description: 'queue policy maxRetries override (action=queue state=on)' },
         maxdelay: { type: 'string', description: 'queue policy backoff.maxDelayMs override in ms (action=queue state=on)' },
         model: { type: 'string', description: "model id to test (defaults to the provider's first configured model)" },

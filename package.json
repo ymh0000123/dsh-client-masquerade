@@ -1,7 +1,7 @@
 {
   "name": "dsh-client-masquerade",
-  "version": "1.5.2",
-  "description": "DeepSeek Harness plugin: make a custom llm-pi-ai provider route masquerade as Claude Code / Codex by injecting spoofed client-identity headers into its profile settings.",
+  "version": "1.6.0",
+  "description": "DeepSeek Harness plugin: make a custom llm-pi-ai provider route masquerade as Claude Code / Codex — spoofed client-identity headers, plus an opt-in request-body fingerprint for relays that gate on the body.",
   "keywords": [
     "deepseek-harness",
     "dsh",

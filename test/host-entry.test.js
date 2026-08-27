@@ -119,20 +119,35 @@ test('detectPresetDetailed distinguishes exact, stale, custom and empty', () => 
   );
   assert.deepEqual(detectPresetDetailed({ 'x-custom': '1' }), { active: 'custom', stale: false });
 
-  // The exact rejections observed from anyrouter.top during diagnosis. A 503 /
-  // 429 "Service Unavailable" is the relay QUEUEING (no free upstream channel):
-  // retrying with backoff eventually gets through, and it is never a disguise
-  // fault — a real Claude Code CLI gets the identical rejection.
-  const queued = classifyCallError('503 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
+  // The exact rejections observed from anyrouter.top during diagnosis. A bare
+  // 503 / 429 "Service Unavailable" from this relay family is AMBIGUOUS: its
+  // channel pool may be busy, or its Claude Code body check may have refused
+  // the request. Reading it unconditionally as a queue is what made an earlier
+  // version advise "just wait" for a route that never recovered, so the
+  // classifier now answers from the route state it can actually observe.
+  const unknownBody = classifyCallError('503 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
+  assert.equal(unknownBody.category, 'body-fingerprint');
+  assert.equal(unknownBody.disguiseImplicated, true, 'without body masquerade, the body check is the untested explanation');
+  assert.ok(unknownBody.hint.includes('body'), 'the hint must point at the body-level check');
+
+  const throttledNoBody = classifyCallError('429 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
+  assert.equal(throttledNoBody.category, 'body-fingerprint');
+
+  // Switch on but patch missing: the most misleading state, since the body still
+  // looks like DSH while settings say otherwise.
+  const wantedNotLive = classifyCallError('503 Service Unavailable', { bodyMasquerade: true, bodyPatched: false });
+  assert.equal(wantedNotLive.category, 'body-fingerprint');
+  assert.equal(wantedNotLive.disguiseImplicated, true);
+  assert.ok(wantedNotLive.hint.includes('patch'), 'the hint must say the patch is what is missing');
+
+  // Body masquerade live: a busy pool is now the better reading, and a real
+  // Claude Code CLI would get the identical rejection.
+  const queued = classifyCallError('503 Service Unavailable', { bodyMasquerade: true, bodyPatched: true });
   assert.equal(queued.category, 'queued');
   assert.equal(queued.disguiseImplicated, false);
   assert.ok(queued.hint.includes('queue'), 'the hint must point at the queue mechanism');
 
-  const throttled = classifyCallError('429 {"error":{"message":"Service Unavailable","type":"error"},"type":"error"}');
-  assert.equal(throttled.category, 'queued');
-  assert.equal(throttled.disguiseImplicated, false, '429 + "Service Unavailable" is the relay queueing, not a disguise fault');
-
-  const noChannel = classifyCallError('500 当前模型 gpt-5.6-sol 负载已经达到上限，请稍后重试 code:get_channel_failed');
+  const noChannel = classifyCallError('500 当前模型 gpt-5.6-sol 负载已经达到上限，请稍后重试 code:get_channel_failed', { bodyMasquerade: true, bodyPatched: true });
   assert.equal(noChannel.category, 'queued');
   assert.equal(noChannel.disguiseImplicated, false);
 
@@ -143,6 +158,11 @@ test('detectPresetDetailed distinguishes exact, stale, custom and empty', () => 
   const auth = classifyCallError('401 UNAUTHENTICATED');
   assert.equal(auth.category, 'auth');
   assert.equal(auth.disguiseImplicated, true);
+
+  // The relay's own body-shape refusal now has an actionable fix.
+  const shape = classifyCallError('400 invalid claude code request');
+  assert.equal(shape.category, 'shape-validation');
+  assert.ok(shape.hint.includes('body masquerade'), 'shape validation should point at body masquerade, not declare it out of scope');
 });
 
 // anyrouter-style relays queue while their channel pool is empty; the provider

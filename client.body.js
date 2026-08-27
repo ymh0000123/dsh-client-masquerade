@@ -41,6 +41,15 @@ const DICTS = {
     uaReverting: 'reverting…',
     uaRevertedMsg: 'Patch reverted — restart dsh web to take effect.',
     uaAlreadyStock: 'Patch already reverted.',
+    body: 'Body masquerade',
+    bodyOn: 'On (injects Glob/Grep/Read)',
+    bodyOff: 'Off',
+    bodyEnable: 'Body on',
+    bodyDisable: 'Body off',
+    bodyBusy: 'updating…',
+    bodyHelp: 'For relays that fingerprint the request body (anyrouter family): they answer a bare 429/503 — which looks exactly like a busy channel pool — unless the body carries a JSON metadata.user_id, a client-identity system block and verbatim tool definitions. The sentinel tools are advertised to the model but not implemented here; they are read-only, so a stray call just fails that step.',
+    bodyEnabledMsg: 'Body masquerade enabled for {provider}. Dynamic mode cannot write the patch that performs it — run patches/apply-pi-ai-body-patch.mjs and restart dsh web.',
+    bodyDisabledMsg: 'Body masquerade cleared for {provider}.',
     queue: 'Queue adaptation',
     queueOn: 'Queued (retries {retries}×, up to {maxdelay}ms)',
     queueOff: 'Off',
@@ -85,6 +94,15 @@ const DICTS = {
     uaReverting: '正在还原…',
     uaRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
     uaAlreadyStock: '补丁已是原状。',
+    body: '请求体伪装',
+    bodyOn: '已开启（注入 Glob/Grep/Read）',
+    bodyOff: '关闭',
+    bodyEnable: '开启请求体伪装',
+    bodyDisable: '关闭请求体伪装',
+    bodyBusy: '更新中…',
+    bodyHelp: '用于按请求体识别客户端的中转站（anyrouter 系）：请求体若不带 JSON 格式的 metadata.user_id、客户端身份 system 块和逐字的工具定义，它们只回一个裸的 429/503——看起来和渠道池繁忙一模一样。哨兵工具会告知模型但本地并未实现；它们都是只读工具，模型误调至多让那一步失败。',
+    bodyEnabledMsg: '已为 {provider} 开启请求体伪装。动态模式无法写入执行注入的补丁——请执行 patches/apply-pi-ai-body-patch.mjs 并重启 dsh web。',
+    bodyDisabledMsg: '已清除 {provider} 的请求体伪装。',
     queue: '排队适配',
     queueOn: '已开启（重试 {retries} 次，最长 {maxdelay}ms）',
     queueOff: '关闭',
@@ -128,7 +146,7 @@ return {
       : (key, params) => interpolate(DICTS.en[key] !== undefined ? DICTS.en[key] : key, params);
 
     function MaskPanel() {
-      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false });
+      const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false, bodyBusy: false });
       const [, setRev] = React.useState(0);
 
       React.useEffect(() => {
@@ -190,6 +208,26 @@ return {
           })
           .catch((err) => {
             setState((s) => Object.assign({}, s, { patchBusy: false, patchError: String(err && err.message ? err.message : err) }));
+          });
+      };
+
+      const toggleBody = (enabled) => {
+        if (!state.selected) return;
+        setState((s) => Object.assign({}, s, { bodyBusy: true, error: '', message: '' }));
+        host.call('mask-client-rpc', { action: 'body', provider: state.selected, state: enabled ? 'on' : 'off' })
+          .then((res) => {
+            if (res && res.ok) {
+              const label = (state.providers.find((p) => p.id === state.selected) || {}).displayName || state.selected;
+              setState((s) => Object.assign({}, s, {
+                bodyBusy: false,
+                message: enabled ? t('bodyEnabledMsg', { provider: label }) : t('bodyDisabledMsg', { provider: label })
+              }));
+              return refresh();
+            }
+            setState((s) => Object.assign({}, s, { bodyBusy: false, error: res && res.error ? res.error : t('requestFailed') }));
+          })
+          .catch((err) => {
+            setState((s) => Object.assign({}, s, { bodyBusy: false, error: String(err && err.message ? err.message : err) }));
           });
       };
 
@@ -304,6 +342,20 @@ return {
               }, state.patchBusy ? t('uaApplying') : t('uaApply')))
             : el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
         ]),
+        row([
+          el('span', { key: 'bl', style: { fontSize: '12px' } }, t('body') + ': ' + (
+            selectedInfo && selectedInfo.bodyMasquerade ? t('bodyOn') : t('bodyOff')
+          )),
+          el('button', {
+            key: 'bb',
+            className: 'dshcm-btn' + (selectedInfo && selectedInfo.bodyMasquerade ? ' dshcm-btn-off' : ''),
+            disabled: state.bodyBusy || !state.selected,
+            onClick: () => toggleBody(!(selectedInfo && selectedInfo.bodyMasquerade))
+          }, state.bodyBusy
+            ? t('bodyBusy')
+            : (selectedInfo && selectedInfo.bodyMasquerade ? t('bodyDisable') : t('bodyEnable')))
+        ]),
+        el('div', { key: 'bh', style: { fontSize: '11px', opacity: 0.7, lineHeight: 1.5 } }, t('bodyHelp')),
         row([
           el('span', { key: 'ql', style: { fontSize: '12px' } }, t('queue') + ': ' + (
             selectedInfo && selectedInfo.queue

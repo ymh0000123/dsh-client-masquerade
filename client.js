@@ -50,10 +50,23 @@ window.__ModuleLoader__.load({
 				variantPatched: 'applied',
 				variantNotPatched: 'not applied',
 				variantSkipped: 'not installed',
+				bodyPatch: 'Body patch',
+				bodyPatched: 'applied',
+				bodyNotPatched: 'not applied',
 				patchesAppliedMsg: 'Patches written — restart dsh web to take effect.',
 				patchesAlready: 'Patches already applied.',
 				patchesRevertedMsg: 'Patches reverted — restart dsh web to take effect.',
 				patchesAlreadyStock: 'Patches already reverted.',
+				body: 'Body masquerade',
+				bodyOn: 'On (injects {tools})',
+				bodyOff: 'Off',
+				bodyEnable: 'Body on',
+				bodyDisable: 'Body off',
+				bodyBusy: 'updating…',
+				bodyHelp: 'For relays that fingerprint the request body (anyrouter family): they answer a bare 429/503 — which looks exactly like a busy channel pool — unless the body carries a JSON metadata.user_id, a client-identity system block and verbatim tool definitions. The sentinel tools are advertised to the model but not implemented here; they are read-only, so a stray call just fails that step.',
+				bodyEnabledMsg: 'Body masquerade enabled for {provider} — requests now carry the Claude Code body fingerprint.',
+				bodyDisabledMsg: 'Body masquerade cleared for {provider}.',
+				bodyNeedsPatch: 'The body patch is not applied yet, so this has no effect on the wire — apply the patches above and restart dsh web.',
 				queue: 'Queue adaptation',
 				queueOn: 'Queued (retries {retries}×, up to {maxdelay}ms)',
 				queueOff: 'Off',
@@ -102,10 +115,23 @@ window.__ModuleLoader__.load({
 				variantPatched: '已应用',
 				variantNotPatched: '未应用',
 				variantSkipped: '未安装',
+				bodyPatch: '请求体补丁',
+				bodyPatched: '已应用',
+				bodyNotPatched: '未应用',
 				patchesAppliedMsg: '补丁已写入，重启 dsh web 后生效。',
 				patchesAlready: '补丁均已应用。',
 				patchesRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
 				patchesAlreadyStock: '补丁已是原状。',
+				body: '请求体伪装',
+				bodyOn: '已开启（注入 {tools}）',
+				bodyOff: '关闭',
+				bodyEnable: '开启请求体伪装',
+				bodyDisable: '关闭请求体伪装',
+				bodyBusy: '更新中…',
+				bodyHelp: '用于按请求体识别客户端的中转站（anyrouter 系）：请求体若不带 JSON 格式的 metadata.user_id、客户端身份 system 块和逐字的工具定义，它们只回一个裸的 429/503——看起来和渠道池繁忙一模一样。哨兵工具会告知模型但本地并未实现；它们都是只读工具，模型误调至多让那一步失败。',
+				bodyEnabledMsg: '已为 {provider} 开启请求体伪装——请求将携带 Claude Code 的请求体指纹。',
+				bodyDisabledMsg: '已清除 {provider} 的请求体伪装。',
+				bodyNeedsPatch: '请求体补丁尚未应用，此开关暂不会影响线上请求——请先应用上方补丁并重启 dsh web。',
 				queue: '排队适配',
 				queueOn: '已开启（重试 {retries} 次，最长 {maxdelay}ms）',
 				queueOff: '关闭',
@@ -162,7 +188,7 @@ window.__ModuleLoader__.load({
 				: (key, params) => interpolate(DICTS.en[key] !== undefined ? DICTS.en[key] : key, params);
 
 			function MaskPanel() {
-				const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, variantPatch: null, patchBusy: false, patchMsg: '', patchError: '', queueBusy: false });
+				const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, variantPatch: null, bodyPatch: null, sentinelTools: [], patchBusy: false, patchMsg: '', patchError: '', queueBusy: false, bodyBusy: false });
 				const [, setRev] = React.useState(0);
 
 				React.useEffect(() => {
@@ -181,7 +207,9 @@ window.__ModuleLoader__.load({
 							message: '',
 							error: '',
 							uaPatch: res && res.uaPatch ? res.uaPatch : null,
-							variantPatch: res && res.variantPatch ? res.variantPatch : null
+							variantPatch: res && res.variantPatch ? res.variantPatch : null,
+							bodyPatch: res && res.bodyPatch ? res.bodyPatch : null,
+							sentinelTools: res && Array.isArray(res.sentinelTools) ? res.sentinelTools : []
 						}));
 					}).catch((err) => {
 						setState((s) => Object.assign({}, s, { busy: false, error: String(err && err.message ? err.message : err) }));
@@ -237,6 +265,30 @@ window.__ModuleLoader__.load({
 						})
 						.catch((err) => {
 							setState((s) => Object.assign({}, s, { patchBusy: false, patchError: String(err && err.message ? err.message : err) }));
+						});
+				};
+
+				const toggleBody = (enabled) => {
+					if (!state.selected) return;
+					setState((s) => Object.assign({}, s, { bodyBusy: true, error: '', message: '' }));
+					call({ action: 'body', provider: state.selected, state: enabled ? 'on' : 'off' })
+						.then((res) => {
+							if (res && res.ok) {
+								const label = (state.providers.find((p) => p.id === state.selected) || {}).displayName || state.selected;
+								// Turning it on while the patch is missing is the silent-failure
+								// case: settings look right, the wire does not change. Say so.
+								const needsPatch = enabled && res.applied && res.applied.patched === false;
+								setState((s) => Object.assign({}, s, {
+									bodyBusy: false,
+									message: (enabled ? t('bodyEnabledMsg', { provider: label }) : t('bodyDisabledMsg', { provider: label }))
+										+ (needsPatch ? ' ' + t('bodyNeedsPatch') : '')
+								}));
+								return refresh();
+							}
+							setState((s) => Object.assign({}, s, { bodyBusy: false, error: res && res.error ? res.error : t('requestFailed') }));
+						})
+						.catch((err) => {
+							setState((s) => Object.assign({}, s, { bodyBusy: false, error: String(err && err.message ? err.message : err) }));
 						});
 				};
 
@@ -346,6 +398,11 @@ window.__ModuleLoader__.load({
 								: state.variantPatch.patched === null ? t('variantSkipped')
 								: state.variantPatch.patched ? t('variantPatched') : t('variantNotPatched')
 						)),
+						el('span', { key: 'bpl', style: { fontSize: '12px' } }, t('bodyPatch') + ': ' + (
+							state.bodyPatch === null ? t('dash')
+								: state.bodyPatch.error !== undefined && state.bodyPatch.error ? t('dash')
+								: state.bodyPatch.patched ? t('bodyPatched') : t('bodyNotPatched')
+						)),
 						state.uaPatch !== null && state.uaPatch.supported
 							? (state.uaPatch && state.uaPatch.patched
 								? el('button', {
@@ -362,6 +419,22 @@ window.__ModuleLoader__.load({
 								}, state.patchBusy ? t('uaApplying') : t('uaApply')))
 							: el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
 					]),
+					row([
+						el('span', { key: 'bl', style: { fontSize: '12px' } }, t('body') + ': ' + (
+							selectedInfo && selectedInfo.bodyMasquerade
+								? t('bodyOn', { tools: (state.sentinelTools.length > 0 ? state.sentinelTools : ['Glob', 'Grep', 'Read']).join('/') })
+								: t('bodyOff')
+						)),
+						el('button', {
+							key: 'bb',
+							className: 'dshcm-btn' + (selectedInfo && selectedInfo.bodyMasquerade ? ' dshcm-btn-off' : ''),
+							disabled: state.bodyBusy || !state.selected,
+							onClick: () => toggleBody(!(selectedInfo && selectedInfo.bodyMasquerade))
+						}, state.bodyBusy
+							? t('bodyBusy')
+							: (selectedInfo && selectedInfo.bodyMasquerade ? t('bodyDisable') : t('bodyEnable')))
+					]),
+					el('div', { key: 'bh', style: { fontSize: '11px', opacity: 0.7, lineHeight: 1.5 } }, t('bodyHelp')),
 					row([
 						el('span', { key: 'ql', style: { fontSize: '12px' } }, t('queue') + ': ' + (
 							selectedInfo && selectedInfo.queue
