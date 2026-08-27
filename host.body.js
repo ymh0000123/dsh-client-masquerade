@@ -531,10 +531,14 @@ return {
       } catch (e) {
         callError = String(e && e.message ? e.message : e);
       }
-      const badFinish = finishReason !== null && (finishReason.kind === 'error' || finishReason.kind === 'aborted');
+      // A delegating route (a vision-toolkit wrapper) can end its stream with a
+      // finish chunk carrying no reason at all, so treat anything that is not
+      // an object as "no reason reported" rather than reading through it.
+      const hasReason = finishReason !== null && finishReason !== undefined && typeof finishReason === 'object';
+      const badFinish = hasReason && (finishReason.kind === 'error' || finishReason.kind === 'aborted');
       if (callError === null && badFinish) {
         const failure = finishReason.failure;
-        callError = String(failure && failure.message ? failure.message : 'finish reason: ' + finishReason.kind);
+        callError = String(failure && failure.message ? failure.message : 'finish reason: ' + String(finishReason.kind));
       }
       return { callError: callError, firstText: firstText, finishReason: finishReason, chunkCount: chunkCount };
     };
@@ -595,7 +599,7 @@ return {
         effectiveWireHeaders: effective,
         attempts: attempts,
         firstText: result.firstText,
-        finishReason: result.finishReason === null ? null : result.finishReason.kind,
+        finishReason: result.finishReason !== null && result.finishReason !== undefined && typeof result.finishReason === 'object' ? result.finishReason.kind : null,
         chunkCount: result.chunkCount,
         callError: callError,
         ...(classification ? {

@@ -800,19 +800,33 @@ async function apply(ctx) {
    *   overrides for maxRetries and backoff.maxDelayMs (ms).
    * @returns {{ provider: string, upstream?: string, queue: boolean, retryPolicy: object|null }}
    */
+  /**
+   * Map a route id to the llm-pi-ai provider whose profile backs it.
+   *
+   * `vision-toolkit-<upstream>` wrapper routes are not llm-pi-ai providers and
+   * have no profile of their own: dsh-vision-toolkit delegates every stream to
+   * the upstream route (`llm.stream({...options, provider: upstream})`), so the
+   * upstream's headers, disguise and retry policy are what actually apply.
+   *
+   * @param {Record<string, unknown>} map - the llm-pi-ai providers map.
+   * @param {string} providerId - a provider route id, possibly a wrapper.
+   * @returns {string} the backing provider id (the input, when not a wrapper).
+   */
+  const resolveUpstream = (map, providerId) => {
+    const VARIANT_PREFIX = 'vision-toolkit-';
+    if (providerId.indexOf(VARIANT_PREFIX) !== 0) return providerId;
+    const upstream = providerId.slice(VARIANT_PREFIX.length);
+    if (upstream.length === 0 || !Object.prototype.hasOwnProperty.call(map, upstream)) {
+      throw new Error('provider "' + providerId + '" is a vision-toolkit wrapper whose upstream "' + upstream + '" is not a configured llm-pi-ai route');
+    }
+    return upstream;
+  };
+
   const setQueuePolicy = async (providerId, enabled, override) => {
     const map = providersMap();
-    // vision-toolkit-<upstream> wrapper routes are not llm-pi-ai providers;
-    // their retry policy inherits from the upstream route via the
+    // The wrapper's retry policy inherits from the upstream route via the
     // dsh-vision-toolkit forwarding patch, so write to the upstream profile.
-    const VARIANT_PREFIX = 'vision-toolkit-';
-    let upstream = providerId;
-    if (providerId.indexOf(VARIANT_PREFIX) === 0) {
-      upstream = providerId.slice(VARIANT_PREFIX.length);
-      if (upstream.length === 0 || !Object.prototype.hasOwnProperty.call(map, upstream)) {
-        throw new Error('provider "' + providerId + '" is a vision-toolkit wrapper whose upstream "' + upstream + '" is not a configured llm-pi-ai route');
-      }
-    }
+    const upstream = resolveUpstream(map, providerId);
     requireProvider(map, upstream);
     if (!settings.writable) throw new Error('settings are not writable in this deployment');
     if (!enabled) {
@@ -860,18 +874,28 @@ async function apply(ctx) {
     } catch (e) {
       callError = String(e && e.message ? e.message : e);
     }
-    const badFinish = finishReason !== null && (finishReason.kind === 'error' || finishReason.kind === 'aborted');
+    // A delegating route (a vision-toolkit wrapper) can end its stream with a
+    // finish chunk carrying no reason at all, so treat anything that is not an
+    // object as "no reason reported" rather than reading through it.
+    const hasReason = finishReason !== null && finishReason !== undefined && typeof finishReason === 'object';
+    const badFinish = hasReason && (finishReason.kind === 'error' || finishReason.kind === 'aborted');
     if (callError === null && badFinish) {
       const failure = finishReason.failure;
-      callError = String(failure && failure.message ? failure.message : 'finish reason: ' + finishReason.kind);
+      callError = String(failure && failure.message ? failure.message : 'finish reason: ' + String(finishReason.kind));
     }
     return { callError: callError, firstText: firstText, finishReason: finishReason, chunkCount: chunkCount };
   };
 
   const runTest = async (providerId, modelId, signal) => {
     const map = providersMap();
-    requireProvider(map, providerId);
-    const profile = map[providerId];
+    // Test the route the AGENT actually takes. When that is a vision-toolkit
+    // wrapper, its disguise lives on the upstream profile but the call must go
+    // through the wrapper — otherwise the one route worth verifying (the
+    // agent's default model is typically `vision-toolkit-<upstream>`) is the
+    // one route this action cannot reach.
+    const upstream = resolveUpstream(map, providerId);
+    requireProvider(map, upstream);
+    const profile = map[upstream];
     const headers = headersOf(profile);
     const bodyMasquerade = bodyMasqueradeOf(profile);
     const bodyPatch = bodyPatchState();
@@ -923,6 +947,9 @@ async function apply(ctx) {
     return {
       ok: callError === null,
       provider: providerId,
+      // Named only when the call went through a wrapper, so it is obvious which
+      // profile the reported disguise actually came from.
+      ...(upstream === providerId ? {} : { upstream: upstream }),
       model: chosen,
       activePreset: detectPreset(headers),
       bodyMasquerade: bodyMasquerade,
@@ -930,7 +957,7 @@ async function apply(ctx) {
       effectiveWireHeaders: effective,
       attempts: attempts,
       firstText: result.firstText,
-      finishReason: result.finishReason === null ? null : result.finishReason.kind,
+      finishReason: result.finishReason !== null && result.finishReason !== undefined && typeof result.finishReason === 'object' ? result.finishReason.kind : null,
       chunkCount: result.chunkCount,
       callError: callError,
       ...(uaSpoofIneffective ? {
