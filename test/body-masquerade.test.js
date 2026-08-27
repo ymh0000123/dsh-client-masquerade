@@ -5,20 +5,19 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  BODY_PARAMS_PATCHED, BODY_SWITCH_HEADER, BODY_HEADERS_PATCHED, BODY_HEADERS_ANCHOR, FINGERPRINT
+  BODY_PARAMS_PATCHED, BODY_SWITCH_HEADER, BODY_HEADERS_PATCHED, BODY_HEADERS_ANCHOR, FINGERPRINT, SENTINEL_NOTICE
 } = require('../patches/patch-lib.js');
 
 /**
  * Compile the injected function out of the patch text and hand it back.
  *
- * The patch replaces the stock text up to `return params;` only, so the `}`
- * that closed buildParams in the stock file becomes the closing brace of the
- * injected function. Extracting the snippet therefore has to add that brace
- * back — the same brace the patched file gets from the source it edits.
+ * The injected block is self-contained between its markers (that is what makes
+ * revert version-independent), so the slice needs no synthetic closing brace.
  */
 function loadInjected() {
-  const marker = 'const DSH_MASQUERADE_FINGERPRINT =';
-  const body = BODY_PARAMS_PATCHED.slice(BODY_PARAMS_PATCHED.indexOf(marker)) + '\n}';
+  const begin = BODY_PARAMS_PATCHED.indexOf('const DSH_MASQUERADE_FINGERPRINT =');
+  const end = BODY_PARAMS_PATCHED.lastIndexOf('// <<<');
+  const body = BODY_PARAMS_PATCHED.slice(begin, end);
   // eslint-disable-next-line no-new-func -- compiling the shipped patch text is the point
   return new Function(`${body}\nreturn applyDshClientMasquerade;`)();
 }
@@ -139,14 +138,22 @@ test('a caller-supplied JSON user_id is left alone', () => {
   assert.strictEqual(params.metadata.user_id, mine);
 });
 
-test('sentinel tools are read-only, so a stray call cannot mutate anything', () => {
-  // Glob/Grep/Read is the minimum set the relay accepts, and every one of them
-  // only reads. A model that calls one gets a failed step, never an edit or a
-  // shell command — which is what makes advertising unimplemented tools
-  // tolerable at all.
+test('sentinel tools are advertised as unavailable, so the model leaves them alone', () => {
+  // The harness does not implement these; with their captured descriptions in
+  // place a model calls one, the harness has no result to return, and the turn
+  // hangs after the model has already replied. Measured against a live route:
+  // the gate is on tool NAMES, so the description is free to say "do not call".
   assert.deepStrictEqual(SENTINELS, ['Glob', 'Grep', 'Read']);
+
+  const params = { model: 'm', messages: [] };
+  apply(params, { headers: ON, sessionId: 's' });
+  for (const tool of params.tools) {
+    assert.strictEqual(tool.description, SENTINEL_NOTICE, `${tool.name} must advertise itself as unavailable`);
+    assert.match(tool.description, /do not call/i);
+  }
+  // The captured descriptions still ship, for the day a relay checks them.
   for (const tool of FINGERPRINT.sentinelTools) {
-    assert.ok(typeof tool.description === 'string' && tool.description.length > 0, `${tool.name} needs its captured description`);
+    assert.ok(typeof tool.description === 'string' && tool.description.length > 0, `${tool.name} needs its captured description on file`);
     assert.ok(tool.input_schema && typeof tool.input_schema === 'object', `${tool.name} needs its input schema`);
   }
 });

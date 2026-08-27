@@ -276,6 +276,22 @@ function revertVariantRetryPatch(target) {
 
 const FINGERPRINT = require('./claude-code-fingerprint.js');
 
+/**
+ * The description the sentinel tools are advertised with.
+ *
+ * They exist only to satisfy the relay's tool-name check; the harness does not
+ * implement them. Shipping their CAPTURED descriptions makes a model read them
+ * as real capabilities and call one — the harness then has no result to return,
+ * and the agent turn hangs after the model has already replied ("responded, but
+ * still working"). Measured against a live route: renaming a sentinel drops the
+ * request to 429, but replacing its description does not — the gate is on names
+ * alone — so this text keeps the 200 while stopping the calls.
+ *
+ * If a relay ever starts checking descriptions too, `test/body-fingerprint-probe.mjs`
+ * reports it: its "sentinel descriptions wiped" case turns from 200 into 429.
+ */
+const SENTINEL_NOTICE = 'UNAVAILABLE — do not call this tool. It is advertised for client-compatibility only and is not implemented in this environment; calling it fails the step and returns nothing. Use the host-provided tools instead.';
+
 /** Marker line the patched file contains; also used to detect the patch state. */
 const BODY_MARKER = 'function applyDshClientMasquerade(params, options) {';
 
@@ -312,7 +328,17 @@ const BODY_HEADERS_PATCHED = [
   '}'
 ].join('\n');
 
-/** Stock buildParams tail — the last mutation before the params object is returned. */
+/**
+ * Stock buildParams tail — the last mutation before the params object is
+ * returned, INCLUDING the closing brace of buildParams itself.
+ *
+ * The brace is part of the anchor on purpose: the injected code is then a
+ * self-contained block appended after it, delimited by the markers below, and
+ * revert can cut on those markers instead of matching the injected text
+ * verbatim. That is what keeps an install revertible after this plugin changes
+ * the fingerprint or the injected logic — matching on content meant a lib
+ * patched by one version could not be un-patched by the next.
+ */
 const BODY_PARAMS_ANCHOR = [
   '    if (options?.toolChoice) {',
   '        if (typeof options.toolChoice === "string") {',
@@ -322,12 +348,21 @@ const BODY_PARAMS_ANCHOR = [
   '            params.tool_choice = options.toolChoice;',
   '        }',
   '    }',
-  '    return params;'
+  '    return params;',
+  '}'
 ].join('\n');
 
+/** Delimiters around the injected block; revert cuts on these, not on content. */
+const BODY_BEGIN = '// >>> dsh-client-masquerade: request-body masquerade (generated — do not edit) >>>';
+const BODY_END = '// <<< dsh-client-masquerade: request-body masquerade <<<';
+/** The one line inserted INSIDE buildParams; removed on revert. */
+const BODY_CALL_LINE = '    applyDshClientMasquerade(params, options);';
+
 /**
- * The injected masquerade function plus the call site. Built from the captured
- * fingerprint module so the patch and the plugin's own copy cannot drift.
+ * The injected block: the call site inside buildParams, then a self-contained
+ * function definition after buildParams' closing brace, fenced by the markers.
+ * Built from the captured fingerprint module so the patch and the plugin's own
+ * copy cannot drift.
  */
 const BODY_PARAMS_PATCHED = [
   '    if (options?.toolChoice) {',
@@ -338,17 +373,24 @@ const BODY_PARAMS_PATCHED = [
   '            params.tool_choice = options.toolChoice;',
   '        }',
   '    }',
-  '    applyDshClientMasquerade(params, options);',
+  BODY_CALL_LINE,
   '    return params;',
   '}',
-  '// dsh-client-masquerade: captured from ' + FINGERPRINT.capturedFrom + '. Refresh',
-  '// when Claude Code changes these tool descriptions — a stale fingerprint reads',
-  '// exactly like a busy gateway (429), not like a broken disguise.',
+  BODY_BEGIN,
+  '// Captured from ' + FINGERPRINT.capturedFrom + '. Refresh when Claude Code',
+  '// renames these tools — a stale fingerprint reads exactly like a busy gateway.',
   'const DSH_MASQUERADE_FINGERPRINT = ' + JSON.stringify({
     identitySystemBlock: FINGERPRINT.identitySystemBlock,
     sentinelTools: FINGERPRINT.sentinelTools
   }) + ';',
   'const DSH_MASQUERADE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;',
+  '// Sentinel tools are advertised to satisfy the relay but are NOT implemented',
+  '// here, so the description tells the model to leave them alone. With their',
+  '// captured descriptions in place a model reads them as real capabilities and',
+  '// calls one — the harness then has no result to return and the turn hangs',
+  '// ("responded, still working"). Measured: descriptions are not part of the',
+  '// gate, so replacing them keeps the 200 while stopping the calls.',
+  'const DSH_MASQUERADE_SENTINEL_NOTICE = ' + JSON.stringify(SENTINEL_NOTICE) + ';',
   '/**',
   ' * Derive a UUID-shaped id from an arbitrary seed, deterministically.',
   ' *',
@@ -428,13 +470,15 @@ const BODY_PARAMS_PATCHED = [
   '        params.system = [identityBlock];',
   '    }',
   '    // Sentinel tools are appended, so the model still sees the real toolset',
-  '    // first. They are read-only by design: a model that reaches for one at',
-  '    // worst attempts a search the harness cannot run.',
+  '    // first, and they carry a "do not call" description because the harness',
+  '    // cannot execute them. Only their NAMES satisfy the relay.',
   '    const tools = Array.isArray(params.tools) ? params.tools : [];',
   '    const present = new Set(tools.map((tool) => tool?.name));',
   '    const missing = fingerprint.sentinelTools.filter((tool) => !present.has(tool.name));',
   '    if (missing.length > 0)',
-  '        params.tools = [...tools, ...missing.map((tool) => ({ ...tool }))];'
+  '        params.tools = [...tools, ...missing.map((tool) => ({ ...tool, description: DSH_MASQUERADE_SENTINEL_NOTICE }))];',
+  '}',
+  BODY_END
 ].join('\n');
 
 /**
@@ -467,22 +511,48 @@ function applyBodyPatch(target) {
 
 /**
  * Revert the body-masquerade patch. Idempotent.
+ *
+ * Cuts on the delimiters rather than matching the injected text, so a file
+ * patched by ANY version of this plugin reverts cleanly — the fingerprint and
+ * the injected logic change over time, and a content match would strand the
+ * user on "the patched blocks were not found" after every such change.
+ *
  * @param {string} target - absolute path of the installed dist/api/anthropic-messages.js.
  * @returns {{ reverted: boolean, alreadyStock: boolean }}
- * @throws {Error} when the patched blocks are not found (hand-edited or drifted).
+ * @throws {Error} when the file carries the marker but not the delimiters that bound it.
  */
 function revertBodyPatch(target) {
   const src = readFileSync(target, 'utf8');
   if (!src.includes(BODY_MARKER)) return { reverted: false, alreadyStock: true };
-  if (!src.includes(BODY_HEADERS_PATCHED) || !src.includes(BODY_PARAMS_PATCHED)) {
+
+  const begin = src.indexOf(BODY_BEGIN);
+  const end = src.indexOf(BODY_END);
+  if (begin === -1 || end === -1 || end < begin) {
     throw new Error(
-      'the patched body-masquerade blocks were not found in ' + target +
-      '; it may carry a patch from a different plugin version — reinstall @earendil-works/pi-ai to get a clean file'
+      'the body-masquerade block in ' + target + ' is not delimited as expected; ' +
+      'it may have been hand-edited — reinstall @earendil-works/pi-ai to get a clean file'
     );
   }
-  const reverted = src
-    .replace(BODY_PARAMS_PATCHED, BODY_PARAMS_ANCHOR)
-    .replace(BODY_HEADERS_PATCHED, BODY_HEADERS_ANCHOR);
+  // Drop the fenced block (plus the newline that preceded it), then the call
+  // site inside buildParams. Both are exact, version-independent strings.
+  const beforeBlock = src.slice(0, begin).replace(/\n$/, '');
+  const afterBlock = src.slice(end + BODY_END.length);
+  let reverted = beforeBlock + afterBlock;
+
+  const callLine = BODY_CALL_LINE + '\n';
+  if (!reverted.includes(callLine)) {
+    throw new Error(
+      'the body-masquerade call site was not found in ' + target +
+      '; it may have been hand-edited — reinstall @earendil-works/pi-ai to get a clean file'
+    );
+  }
+  reverted = reverted.replace(callLine, '');
+
+  // The header strip is a small, stable block; match it exactly and fall back
+  // to leaving it alone rather than corrupting a file we no longer recognise.
+  if (reverted.includes(BODY_HEADERS_PATCHED)) {
+    reverted = reverted.replace(BODY_HEADERS_PATCHED, BODY_HEADERS_ANCHOR);
+  }
   writeDetached(target, reverted);
   return { reverted: true, alreadyStock: false };
 }
@@ -490,6 +560,6 @@ function revertBodyPatch(target) {
 module.exports = {
   OLD, NEW, NEW_LEGACY, MARKER, applyPatch, revertPatch,
   VARIANT_MARKER, VARIANT_ANCHOR, VARIANT_PATCHED, applyVariantRetryPatch, revertVariantRetryPatch,
-  BODY_MARKER, BODY_SWITCH_HEADER, BODY_HEADERS_ANCHOR, BODY_HEADERS_PATCHED, BODY_PARAMS_ANCHOR, BODY_PARAMS_PATCHED,
+  BODY_MARKER, BODY_SWITCH_HEADER, SENTINEL_NOTICE, BODY_BEGIN, BODY_END, BODY_CALL_LINE, BODY_HEADERS_ANCHOR, BODY_HEADERS_PATCHED, BODY_PARAMS_ANCHOR, BODY_PARAMS_PATCHED,
   applyBodyPatch, revertBodyPatch, FINGERPRINT
 };

@@ -132,3 +132,52 @@ test('the vision-toolkit variant patch breaks its hard link too', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('revertBodyPatch works on a block this version did not write', (t) => {
+  // The injected text changes whenever the fingerprint or the injected logic
+  // does. Revert therefore cuts on the delimiters, never on content: matching
+  // content meant a lib patched by one version could not be un-patched by the
+  // next, stranding the user on "the patched blocks were not found".
+  const dir = mkdtempSync(join(tmpdir(), 'dshcm-drift-'));
+  try {
+    const stock = stockPiAiSource(t, dir);
+    if (stock === undefined) return;
+    const target = join(dir, 'drifted.js');
+    writeFileSync(target, stock, 'utf8');
+    lib.applyBodyPatch(target);
+
+    // Simulate a future version: same delimiters, different innards.
+    const patched = readFileSync(target, 'utf8');
+    const begin = patched.indexOf(lib.BODY_BEGIN);
+    const end = patched.indexOf(lib.BODY_END);
+    assert.ok(begin !== -1 && end > begin, 'the delimiters must be present');
+    const drifted = patched.slice(0, begin) + lib.BODY_BEGIN
+      + '\nfunction applyDshClientMasquerade(params, options) { /* a later version */ }\n'
+      + 'const SOMETHING_NEW = 1;\n'
+      + patched.slice(end);
+    writeFileSync(target, drifted, 'utf8');
+    assert.ok(readFileSync(target, 'utf8').includes(lib.BODY_MARKER), 'the drifted file still reads as patched');
+
+    const result = lib.revertBodyPatch(target);
+    assert.strictEqual(result.reverted, true);
+    assert.strictEqual(readFileSync(target, 'utf8'), stock, 'a drifted block must still revert to exact stock');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('revertBodyPatch refuses a file whose delimiters were hand-edited', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshcm-drift-'));
+  try {
+    const stock = stockPiAiSource(t, dir);
+    if (stock === undefined) return;
+    const target = join(dir, 'mangled.js');
+    writeFileSync(target, stock, 'utf8');
+    lib.applyBodyPatch(target);
+    // Remove the closing delimiter but leave the marker: an unrecognisable file.
+    writeFileSync(target, readFileSync(target, 'utf8').replace(lib.BODY_END, ''), 'utf8');
+    assert.throws(() => lib.revertBodyPatch(target), /not delimited as expected|hand-edited/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
