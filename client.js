@@ -34,6 +34,14 @@ window.__ModuleLoader__.load({
 				'preset.claude-code': 'Claude Code',
 				'preset.codex': 'Codex',
 				'preset.custom': 'Custom',
+				patches: 'Patches',
+				patchesApplyAll: 'Apply',
+				patchesRevertAll: 'Revert',
+				advanced: 'Advanced options',
+				details: 'Details',
+				hideDetails: 'Hide',
+				uaShort: 'UA',
+				bodyShort: 'Body',
 				uaPatch: 'User-Agent patch',
 				uaPatched: 'applied',
 				uaNotPatched: 'not applied',
@@ -46,6 +54,7 @@ window.__ModuleLoader__.load({
 				uaReverting: 'reverting…',
 				uaRevertedMsg: 'Patch reverted — restart dsh web to take effect.',
 				uaAlreadyStock: 'Patch already reverted.',
+				variantShort: 'Vtk',
 				variantPatch: 'Vision-toolkit patch',
 				variantPatched: 'applied',
 				variantNotPatched: 'not applied',
@@ -99,6 +108,14 @@ window.__ModuleLoader__.load({
 				'preset.claude-code': 'Claude Code',
 				'preset.codex': 'Codex',
 				'preset.custom': '自定义',
+				patches: '补丁',
+				patchesApplyAll: '应用',
+				patchesRevertAll: '还原',
+				advanced: '高级选项',
+				details: '详情',
+				hideDetails: '收起',
+				uaShort: 'UA',
+				bodyShort: 'Body',
 				uaPatch: 'User-Agent 补丁',
 				uaPatched: '已应用',
 				uaNotPatched: '未应用',
@@ -111,6 +128,7 @@ window.__ModuleLoader__.load({
 				uaReverting: '正在还原…',
 				uaRevertedMsg: '补丁已还原，重启 dsh web 后生效。',
 				uaAlreadyStock: '补丁已是原状。',
+				variantShort: 'Vtk',
 				variantPatch: 'Vision-toolkit 变体补丁',
 				variantPatched: '已应用',
 				variantNotPatched: '未应用',
@@ -189,6 +207,7 @@ window.__ModuleLoader__.load({
 
 			function MaskPanel() {
 				const [state, setState] = React.useState({ providers: [], selected: '', busy: false, message: '', error: '', uaPatch: null, variantPatch: null, bodyPatch: null, sentinelTools: [], patchBusy: false, patchMsg: '', patchError: '', queueBusy: false, bodyBusy: false });
+				const [detailsOpen, setDetailsOpen] = React.useState(false);
 				const [, setRev] = React.useState(0);
 
 				React.useEffect(() => {
@@ -387,82 +406,75 @@ window.__ModuleLoader__.load({
 					]),
 					el('div', { key: 'status', style: { fontSize: '12px' } }, t('status') + ': ' + statusText),
 					row([
-						el('span', { key: 'ual', style: { fontSize: '12px' } }, t('uaPatch') + ': ' + (
-							state.uaPatch === null ? t('dash')
-								: state.uaPatch.error !== undefined && state.uaPatch.error ? t('dash')
-								: state.uaPatch.patched ? t('uaPatched') : t('uaNotPatched')
-						)),
-						el('span', { key: 'vpl', style: { fontSize: '12px' } }, t('variantPatch') + ': ' + (
-							state.variantPatch === null ? t('dash')
-								: state.variantPatch.error !== undefined && state.variantPatch.error ? t('dash')
-								: state.variantPatch.patched === null ? t('variantSkipped')
-								: state.variantPatch.patched ? t('variantPatched') : t('variantNotPatched')
-						)),
-						el('span', { key: 'bpl', style: { fontSize: '12px' } }, t('bodyPatch') + ': ' + (
-							state.bodyPatch === null ? t('dash')
-								: state.bodyPatch.error !== undefined && state.bodyPatch.error ? t('dash')
-								: state.bodyPatch.patched ? t('bodyPatched') : t('bodyNotPatched')
-						)),
-						state.uaPatch !== null && state.uaPatch.supported
-							? (state.uaPatch && state.uaPatch.patched
-								? el('button', {
-									key: 'ur',
-									className: 'dshcm-btn dshcm-btn-off',
-									disabled: state.patchBusy,
-									onClick: () => unpatch()
-								}, state.patchBusy ? t('uaReverting') : t('uaRevert'))
-								: el('button', {
-									key: 'ub',
-									className: 'dshcm-btn',
-									disabled: state.patchBusy,
-									onClick: () => applyPatch()
-								}, state.patchBusy ? t('uaApplying') : t('uaApply')))
-							: el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
-					]),
-					row([
-						el('span', { key: 'bl', style: { fontSize: '12px' } }, t('body') + ': ' + (
-							selectedInfo && selectedInfo.bodyMasquerade
-								? t('bodyOn', { tools: (state.sentinelTools.length > 0 ? state.sentinelTools : ['Glob', 'Grep', 'Read']).join('/') })
-								: t('bodyOff')
-						)),
-						el('button', {
-							key: 'bb',
-							className: 'dshcm-btn' + (selectedInfo && selectedInfo.bodyMasquerade ? ' dshcm-btn-off' : ''),
-							disabled: state.bodyBusy || !state.selected,
-							onClick: () => toggleBody(!(selectedInfo && selectedInfo.bodyMasquerade))
-						}, state.bodyBusy
-							? t('bodyBusy')
-							: (selectedInfo && selectedInfo.bodyMasquerade ? t('bodyDisable') : t('bodyEnable')))
-					]),
-					el('div', { key: 'bh', style: { fontSize: '11px', opacity: 0.7, lineHeight: 1.5 } }, t('bodyHelp')),
-					row([
-						el('span', { key: 'ql', style: { fontSize: '12px' } }, t('queue') + ': ' + (
-							selectedInfo && selectedInfo.queue
-								? t('queueOn', {
-									retries: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxRetries) || '—',
-									maxdelay: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxDelayMs) || '—'
-								})
-								: t('queueOff')
-						)),
-						el('button', {
-							key: 'qb',
-							className: 'dshcm-btn' + (selectedInfo && selectedInfo.queue ? ' dshcm-btn-off' : ''),
-							disabled: state.queueBusy || !state.selected,
-							onClick: () => toggleQueue(!(selectedInfo && selectedInfo.queue))
-						}, state.queueBusy
-							? t('queueBusy')
-							: (selectedInfo && selectedInfo.queue ? t('queueDisable') : t('queueEnable')))
-					]),
-					state.patchMsg ? el('div', { key: 'pm', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.patchMsg) : null,
-					state.patchError ? el('div', { key: 'pe', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.patchError) : null,
-					row([
 						el('button', { key: 'cc', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('claude-code') }, t('preset.claude-code')),
 						el('button', { key: 'cx', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => act('codex') }, t('preset.codex')),
 						el('button', { key: 'off', className: 'dshcm-btn dshcm-btn-off', disabled: state.busy || !state.selected, onClick: () => act('off') }, t('off')),
 						el('button', { key: 't', className: 'dshcm-btn', disabled: state.busy || !state.selected, onClick: () => test() }, t('testCall'))
 					]),
-					el('div', { key: 'headersLabel', style: { fontSize: '12px', fontWeight: 600 } }, t('currentHeaders')),
-					el('div', { key: 'headers', style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, headerRows),
+					el('a', { key: 'adv', href: '#', style: { fontSize: '12px', opacity: 0.75 }, onClick: (e) => { e.preventDefault(); setDetailsOpen((v) => !v); } }, (detailsOpen ? t('hideDetails') : t('details')) + ' · ' + t('advanced')),
+					detailsOpen ? el('div', { key: 'advBody', style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '2px' } },
+						row([
+							el('span', { key: 'pl', style: { fontSize: '12px', fontWeight: 600 } }, t('patches')),
+							el('span', { key: 'ps', style: { fontSize: '12px', opacity: 0.85 } },
+								t('uaShort') + ' / ' + (state.uaPatch === null ? t('dash') : (state.uaPatch.patched ? t('uaPatched') : (state.uaPatch.error ? t('dash') : t('uaNotPatched'))))
+								+ ' · ' + t('variantShort') + ' / ' + (state.variantPatch === null ? t('dash') : (state.variantPatch.patched === null ? t('variantSkipped') : (state.variantPatch.patched ? t('variantPatched') : (state.variantPatch.error ? t('dash') : t('variantNotPatched')))))
+								+ ' · ' + t('bodyShort') + ' / ' + (state.bodyPatch === null ? t('dash') : (state.bodyPatch.patched ? t('bodyPatched') : (state.bodyPatch.error ? t('dash') : t('bodyNotPatched'))))
+							),
+							state.uaPatch !== null && state.uaPatch.supported
+								? (state.uaPatch && state.uaPatch.patched
+									? el('button', {
+										key: 'ur',
+										className: 'dshcm-btn dshcm-btn-off',
+										disabled: state.patchBusy,
+										onClick: () => unpatch()
+									}, state.patchBusy ? t('uaReverting') : t('patchesRevertAll'))
+									: el('button', {
+										key: 'ub',
+										className: 'dshcm-btn',
+										disabled: state.patchBusy,
+										onClick: () => applyPatch()
+									}, state.patchBusy ? t('uaApplying') : t('patchesApplyAll')))
+								: el('span', { key: 'un', style: { fontSize: '11px', opacity: 0.7 } }, t('uaUnsupported'))
+						]),
+						row([
+							el('span', { key: 'bl', style: { fontSize: '12px', fontWeight: 600 } }, t('body') + ': ' + (
+								selectedInfo && selectedInfo.bodyMasquerade
+									? t('bodyOn', { tools: (state.sentinelTools.length > 0 ? state.sentinelTools : ['Glob', 'Grep', 'Read']).join('/') })
+									: t('bodyOff')
+							)),
+							el('button', {
+								key: 'bb',
+								className: 'dshcm-btn' + (selectedInfo && selectedInfo.bodyMasquerade ? ' dshcm-btn-off' : ''),
+								disabled: state.bodyBusy || !state.selected,
+								onClick: () => toggleBody(!(selectedInfo && selectedInfo.bodyMasquerade))
+							}, state.bodyBusy
+								? t('bodyBusy')
+								: (selectedInfo && selectedInfo.bodyMasquerade ? t('bodyDisable') : t('bodyEnable')))
+						]),
+						el('div', { key: 'bh', style: { fontSize: '11px', opacity: 0.7, lineHeight: 1.5 } }, t('bodyHelp')),
+						row([
+							el('span', { key: 'ql', style: { fontSize: '12px', fontWeight: 600 } }, t('queue') + ': ' + (
+								selectedInfo && selectedInfo.queue
+									? t('queueOn', {
+										retries: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxRetries) || '—',
+										maxdelay: (selectedInfo.retryPolicy && selectedInfo.retryPolicy.maxDelayMs) || '—'
+									})
+									: t('queueOff')
+							)),
+							el('button', {
+								key: 'qb',
+								className: 'dshcm-btn' + (selectedInfo && selectedInfo.queue ? ' dshcm-btn-off' : ''),
+								disabled: state.queueBusy || !state.selected,
+								onClick: () => toggleQueue(!(selectedInfo && selectedInfo.queue))
+							}, state.queueBusy
+								? t('queueBusy')
+								: (selectedInfo && selectedInfo.queue ? t('queueDisable') : t('queueEnable')))
+						]),
+						el('div', { key: 'headersLabel', style: { fontSize: '12px', fontWeight: 600 } }, t('currentHeaders')),
+						el('div', { key: 'headers', style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, headerRows)
+					) : null,
+					state.patchMsg ? el('div', { key: 'pm', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.patchMsg) : null,
+					state.patchError ? el('div', { key: 'pe', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.patchError) : null,
 					state.message ? el('div', { key: 'msg', style: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } }, state.message) : null,
 					state.error ? el('div', { key: 'err', style: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' } }, state.error) : null
 				);
