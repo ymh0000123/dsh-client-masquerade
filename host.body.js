@@ -642,7 +642,17 @@ return {
             registeredRoutes = [{ error: String(e && e.message ? e.message : e) }];
           }
         }
-        return { ok: true, providers: listProviders(), registeredRoutes: registeredRoutes, uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' }, variantPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the dsh-vision-toolkit variant patch; run node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs manually and restart' } };
+        return {
+          ok: true,
+          providers: listProviders(),
+          registeredRoutes: registeredRoutes,
+          uaPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai user-agent patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs manually and restart' },
+          bodyPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the pi-ai request-body patch; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-body-patch.mjs manually and restart' },
+          variantPatch: { supported: false, patched: null, error: 'dynamic mode cannot inspect or apply the dsh-vision-toolkit variant patch; run node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs manually and restart' },
+          // What body masquerade would advertise to the model, so the settings
+          // card can name the cost without reading the patch.
+          sentinelTools: SENTINEL_TOOL_NAMES.slice()
+        };
       }
       if (action === 'patch') {
         return { ok: false, error: 'dynamic mode cannot apply the patches; run node node_modules/dsh-client-masquerade/patches/apply-pi-ai-useragent-patch.mjs and node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs manually and restart' };

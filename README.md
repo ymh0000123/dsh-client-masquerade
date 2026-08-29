@@ -41,7 +41,7 @@ node node_modules/dsh-client-masquerade/patches/apply-variant-retry-patch.mjs   
 
 > 兼容旧版：若 `dsh-llm-pi-ai` 的补丁是**旧版插件**（<1.2.0）写入的（requestHeaders 块是另一种等价写法），`还原` 也能正确识别并还原为原始版本；`应用` 会把它升级为当前版本的补丁形态。不再出现 "neither the stock nor the patched requestHeaders block found"。
 
-> 安装模式下也可以直接在网页设置页（Settings → Client Masquerade → **User-Agent 补丁 → 应用**）一键写入补丁，之后重启 `dsh web` 生效；动态模式无文件系统权限，仍需手动执行上面的命令。
+> 安装模式下也可以直接在网页设置页（Settings → Client Masquerade → **运行时补丁 → 全部应用**）一键写入全部三个补丁，之后重启 `dsh web` 生效；动态模式无文件系统权限，设置页只显示补丁状态，仍需手动执行上面的命令。
 
 之后重启：
 
@@ -62,8 +62,8 @@ dsh web
 | --- | --- |
 | 安装 | `dsh plugin --profile web add github:ymh0000123/dsh-client-masquerade` |
 | 卸载 | `dsh plugin --profile web remove dsh-client-masquerade` |
-| 补丁应用（全部三个） | 设置页 **User-Agent 补丁 → 应用**，或 `mask_client action=patch`（重启 `dsh web` 生效） |
-| 补丁还原（全部三个） | 设置页 **User-Agent 补丁 → 还原**，或 `mask_client action=unpatch`（重启 `dsh web` 生效） |
+| 补丁应用（全部三个） | 设置页 **运行时补丁 → 全部应用**，或 `mask_client action=patch`（重启 `dsh web` 生效） |
+| 补丁还原（全部三个） | 设置页 **运行时补丁 → 全部还原**，或 `mask_client action=unpatch`（重启 `dsh web` 生效） |
 | 单独应用请求体补丁 | `node node_modules/dsh-client-masquerade/patches/apply-pi-ai-body-patch.mjs`（`--revert` 还原） |
 | 清除伪装头 | 设置页点 **Off**，或 `mask_client action=off provider=<id>`（连同请求体伪装开关一并清除） |
 
@@ -97,7 +97,7 @@ dsh web
 - 为任意已配置的 `llm-pi-ai` provider 一键应用/清除/切换伪装：**Claude Code**、**Codex**、或自定义请求头。
 - 伪装头写入 provider 配置的 `headers` 字段（`settings.yaml` 中 `llm-pi-ai.providers.<id>.headers`），由 pi-ai 适配器在**每次请求**（Anthropic Messages 与 OpenAI 兼容协议均覆盖）原样发送。
 - **请求体伪装**：按需给 Anthropic 协议的请求体注入 Claude Code 的指纹（`metadata.user_id`、身份 system 块、哨兵工具定义），过 anyrouter 系网关的客户端校验——**这是仅靠请求头过不去的那一关**。
-- 三个入口：**设置页**（Settings → Client Masquerade）、**模型工具 `mask_client`**（list / on / off / test / body / queue）、动态模式下另有 Run 卡片面板。
+- 三个入口：**设置页**（Settings → Client Masquerade，卡片式面板：顶部四格状态摘要 + 身份伪装 / 请求体伪装 / 排队适配 / 运行时补丁 / 当前请求头）、**模型工具 `mask_client`**（list / on / off / test / body / queue）、动态模式下另有 Run 卡片面板。
 - 界面中英双语，跟随 Harness 语言设置实时切换。
 - `test` 动作会真实发起一次最小流式调用，报告网关实际收到的请求头与模型回复/报错，并按该路线的伪装状态给出可执行的判断。
 
@@ -231,7 +231,7 @@ mask_client action=queue provider=anyrouter state=off           # 关闭，回�
 
 ## 使用 / Usage
 
-**设置页**：选择 provider → 点 **Claude Code / Codex / Off**，或 **Test call** 验证伪装是否生效；**排队适配**开关控制该 provider 的排队重试策略。
+**设置页**：顶部「路由」下拉选 provider，四格摘要（身份伪装 / 请求体 / 排队 / 补丁）先给出该路由的当前全貌；下面每张卡片各管一件事——**身份伪装**用分段控件在 Claude Code / Codex / 关闭 之间切换，右上角 **测试调用** 验证是否真的生效；**请求体伪装** 与 **排队适配** 各一个开关，并展示哨兵工具、生效中的重试策略字段（含「agent 循环已生效」判定）；**运行时补丁** 一行一个补丁及其状态，安装模式可**全部应用 / 全部还原**；**当前请求头**默认折叠。
 
 **模型工具 `mask_client`**：
 
